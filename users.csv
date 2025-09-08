@@ -1,0 +1,31 @@
+email,password,last_login,permissions,remember
+<<<<<<< HEAD
+<<<<<<< head,,,,
+clnogueira@universal.org,123,2025-09-01 22:51:10.437377,"['Combustível', 'Condutores', 'Infrações e Multas', 'Acidentes', 'Avarias Corretivas (Acidentes e Mau Uso)', 'Relatórios']",True
+=======,,,,
+<<<<<<< head,,,,
+<<<<<<< head,,,,
+<<<<<<< head,,,,
+clnogueira@universal.org,123,2025-09-01 21:20:48.956052,"['Combustível', 'Condutores', 'Infrações e Multas', 'Acidentes', 'Avarias Corretivas (Acidentes e Mau Uso)', 'Relatórios']",True
+=======
+<<<<<<< head,nan,,,
+<<<<<<< head,nan,,,
+<<<<<<< head,nan,,,
+clnogueira@universal.org,123,2025-09-03 18:37:44.046314,"['Combustível', 'Condutores', 'Infrações e Multas', 'Acidentes', 'Avarias Corretivas (Acidentes e Mau Uso)', 'Relatórios']",True
+>>>>>>> e38438abc29bcb34efb5f7e7e10675b5354a93d8
+teste@teste.com,123,1754812499934949000,"['Combustível', 'Condutores', 'Infrações e Multas', 'Acidentes', 'Avarias Corretivas (Acidentes e Mau Uso)', 'Relatórios']",True
+=======,nan,,,
+clnogueira@universal.org,123,2025-08-26 15:31:49.338577,"['Combustível', 'Condutores', 'Infrações e Multas', 'Acidentes', 'Avarias Corretivas (Acidentes e Mau Uso)', 'Relatórios']",True
+=======,nan,,,
+clnogueira@universal.org,123,2025-08-20 19:55:45.899600,"['Combustível', 'Condutores', 'Infrações e Multas', 'Acidentes', 'Avarias Corretivas (Acidentes e Mau Uso)', 'Relatórios']",True
+>>>>>>> parent of 43624db (correções das janelas),nan,,,
+=======,nan,,,
+clnogueira@universal.org,123,2025-08-18 20:06:46.195474,"['Combustível', 'Condutores', 'Infrações e Multas', 'Acidentes', 'Avarias Corretivas (Acidentes e Mau Uso)', 'Relatórios']",True
+<<<<<<< HEAD
+>>>>>>> parent of f7f355c (atualização de combustível),,,,
+>>>>>>> eb3b715587f8e09a1ccab156c6cb89fd0f459d42,,,,
+=======
+>>>>>>> parent of f7f355c (atualização de combustível),nan,,,
+>>>>>>> e38438abc29bcb34efb5f7e7e10675b5354a93d8
+teste@teste.com,123,2025-08-10 07:54:59.934949,"['Combustível', 'Condutores', 'Infrações e Multas', 'Acidentes', 'Avarias Corretivas (Acidentes e Mau Uso)', 'Relatórios']",True
+>>>>>>> parent of a4470f4 (update),nan,,,
