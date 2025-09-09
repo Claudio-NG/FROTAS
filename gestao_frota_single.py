@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
     QGridLayout, QScrollArea, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView
 )
 
-# === Utils centralizados ===
 from utils import (
     apply_shadow,
     ensure_status_cols,
@@ -532,7 +531,7 @@ class MainWindow(QMainWindow):
         self.tab_widget.tabCloseRequested.connect(self.close_tab)
         self.setCentralWidget(self.tab_widget)
 
-        # ==== Home ====
+        
         home = QWidget()
         hv = QVBoxLayout(home)
 
