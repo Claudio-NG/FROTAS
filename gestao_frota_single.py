@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
     QGridLayout, QScrollArea, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView
 )
 
-
 USERS_FILE = "users.csv"
 
 BASE_DIR = os.path.expanduser("~")
@@ -671,7 +670,9 @@ class MainWindow(QMainWindow):
             ("Combustível", self.open_combustivel),
             ("Relatórios", self.open_relatorios),
             ("Alertas", self.open_alertas),
+            ("Condutor", self.open_condutor),
         ]
+
         for i, (label, slot) in enumerate(buttons):
             b = QPushButton(label)
             b.setMinimumHeight(64)
@@ -689,6 +690,14 @@ class MainWindow(QMainWindow):
         hv.addLayout(bar)
 
         self.tab_widget.addTab(home, "Início")
+
+    def open_condutor(self):
+        try:
+            from condutor import CondutorWindow
+            self.add_or_focus("Condutor", lambda: CondutorWindow())
+        except Exception as e:
+            QMessageBox.warning(self, "Condutor", f"Erro abrindo Condutor.\n{e}")
+
 
     # Helpers
     def add_or_focus(self, title, factory):

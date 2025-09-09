@@ -12,9 +12,7 @@ from PyQt6.QtWidgets import (
     QSplitter, QGroupBox, QWidget, QFileDialog, QScrollArea, QGridLayout
 )
 
-# =============================================================================
-# Configuração local (lê/escreve base.json do projeto) — sem import externo
-# =============================================================================
+
 BASE_DIR = os.path.expanduser("~")
 APP_DIR  = os.path.join(BASE_DIR, "Documentos", "GestaoFrotas")
 CFG_PATH = str(Path(__file__).resolve().parent / "base.json")
@@ -58,9 +56,7 @@ def _cfg_set(key: str, value):
     data[key] = value
     _cfg_save(data)
 
-# =============================================================================
-# Constantes usadas por vários módulos (mantidas aqui para evitar ciclos)
-# =============================================================================
+
 DATE_COLS = ["DATA INDICAÇÃO", "BOLETO", "SGU"]  # datas oficiais
 STATUS_COLOR = {
     "Pago": QColor("#2ecc71"),
@@ -69,9 +65,6 @@ STATUS_COLOR = {
     "": QColor("#BDBDBD"),
 }
 
-# =============================================================================
-# Texto / Normalização
-# =============================================================================
 def _norm(s: str) -> str:
     s = ''.join(ch for ch in unicodedata.normalize('NFKD', str(s or "")) if not unicodedata.combining(ch))
     return re.sub(r"\s+", " ", s.strip()).lower()
@@ -79,9 +72,7 @@ def _norm(s: str) -> str:
 def _only_digits(s: str) -> str:
     return re.sub(r"\D+", "", str(s or ""))
 
-# =============================================================================
-# Filtros (busca global em todas as colunas)
-# =============================================================================
+
 def df_apply_global_texts(df: pd.DataFrame, texts: list[str]) -> pd.DataFrame:
     """
     Aplica filtro 'contém' em TODAS as colunas (case-insensitive).
@@ -109,9 +100,7 @@ def df_apply_global_texts(df: pd.DataFrame, texts: list[str]) -> pd.DataFrame:
         mask_total &= mask_box
     return df[mask_total].copy()
 
-# =============================================================================
-# Combo multi-seleção
-# =============================================================================
+
 class CheckableComboBox(QComboBox):
     changed = pyqtSignal()
     def __init__(self, values):
@@ -387,9 +376,6 @@ def ensure_base_csv():
         os.makedirs(os.path.dirname(out), exist_ok=True)
         gerar_geral_multas_csv()
 
-# =============================================================================
-# Condutor helpers (índice por condutor)
-# =============================================================================
 def build_condutor_dir(nome: str, cpf: str) -> str:
     cond_root = _cfg_get("condutores_root", "")
     if not cond_root:

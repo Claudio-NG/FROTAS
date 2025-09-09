@@ -13,8 +13,6 @@ from gestao_frota_single import cfg_get, DATE_FORMAT
 from utils import apply_shadow, CheckableComboBox, df_apply_global_texts, ensure_status_cols
 
 
-
-
 class _TabelaComFiltros(QWidget):
 
     def __init__(self, titulo):

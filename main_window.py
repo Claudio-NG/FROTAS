@@ -1039,10 +1039,11 @@ class MainWindow(QMainWindow):
             ("Base", self.open_base),
             ("Infrações e Multas", self.open_multas),
             ("Combustível", self.open_combustivel),
-            ("Relatórios", self.open_relatorios),      # agora abre múltiplos arquivos em abas separadas
-            ("Alertas", self.open_alertas),            # método corrigido
-            ("Condutor", self.open_condutor),          # botão ativo
+            ("Relatórios", self.open_relatorios),
+            ("Alertas", self.open_alertas),
+            ("Condutor", self.open_condutor),   # ✅ aqui o botão existe
         ]
+
 
         for i, (label, slot) in enumerate(buttons):
             b = QPushButton(label)
