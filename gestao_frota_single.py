@@ -511,9 +511,6 @@ class DependenciesDialog(QDialog):
         self.accept()
 
 
-# =========================
-# Main Window (sem imports pesados no topo)
-# =========================
 class MainWindow(QMainWindow):
     """
     Janela principal em abas:
