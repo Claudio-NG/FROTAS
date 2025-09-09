@@ -1,4 +1,3 @@
-# utils.py — independente (sem importar gestao_frota_single.py)
 import os, ast, re, shutil, unicodedata, base64
 from glob import glob
 from pathlib import Path
@@ -39,6 +38,7 @@ def _cfg_load() -> dict:
         data.setdefault(k, v)
     return data
 
+
 def _cfg_save(data: dict) -> None:
     try:
         import json
@@ -47,9 +47,11 @@ def _cfg_save(data: dict) -> None:
     except Exception:
         pass
 
+
 def _cfg_get(key: str, default=None):
     data = _cfg_load()
     return data.get(key, _DEFAULTS_LOCAL.get(key, default))
+
 
 def _cfg_set(key: str, value):
     data = _cfg_load()
@@ -65,13 +67,19 @@ STATUS_COLOR = {
     "": QColor("#BDBDBD"),
 }
 
+
 def _norm(s: str) -> str:
     s = ''.join(ch for ch in unicodedata.normalize('NFKD', str(s or "")) if not unicodedata.combining(ch))
     return re.sub(r"\s+", " ", s.strip()).lower()
 
+
 def _only_digits(s: str) -> str:
     return re.sub(r"\D+", "", str(s or ""))
 
+
+# =============================================================================
+# Filtro global de textos (usado por telas)
+# =============================================================================
 
 def df_apply_global_texts(df: pd.DataFrame, texts: list[str]) -> pd.DataFrame:
     """
@@ -103,6 +111,7 @@ def df_apply_global_texts(df: pd.DataFrame, texts: list[str]) -> pd.DataFrame:
 
 class CheckableComboBox(QComboBox):
     changed = pyqtSignal()
+
     def __init__(self, values):
         super().__init__()
         self.set_values(values)
@@ -148,14 +157,16 @@ class CheckableComboBox(QComboBox):
         self.lineEdit().setText("Todos" if n == 0 else f"{n} selecionados")
         self.setEditable(False)
 
+
 # =============================================================================
 # Helpers de data / parsing
 # =============================================================================
+
 def _parse_dt_any(s):
     s = str(s).strip()
     if not s:
         return QDate()
-    for fmt in ["dd/MM/yyyy","dd-MM-yyyy","yyyy-MM-dd","yyyy/MM/dd"]:
+    for fmt in ["dd/MM/yyyy", "dd-MM-yyyy", "yyyy-MM-dd", "yyyy/MM/dd"]:
         q = QDate.fromString(s, fmt)
         if q.isValid():
             return q
@@ -167,18 +178,21 @@ def _parse_dt_any(s):
         pass
     return QDate()
 
+
 def to_qdate_flexible(val):
     if not isinstance(val, str) or not val.strip():
         return QDate()
-    for fmt in ["dd-MM-yyyy","dd/MM/yyyy","yyyy-MM-dd","yyyy/MM/dd"]:
+    for fmt in ["dd-MM-yyyy", "dd/MM/yyyy", "yyyy-MM-dd", "yyyy/MM/dd"]:
         qd = QDate.fromString(val.strip(), fmt)
         if qd.isValid():
             return qd
     return QDate()
 
+
 # =============================================================================
 # Pastores (carregamento flexível)
 # =============================================================================
+
 def _pick_fase_pastores():
     pastores_dir = _cfg_get("pastores_dir")
     base = os.path.join(pastores_dir, "Notificações de Multas - Fase Pastores.xlsx")
@@ -192,54 +206,60 @@ def _pick_fase_pastores():
         return ""
     return max(cands, key=lambda p: os.path.getmtime(p))
 
+
 def load_fase_pastores():
     path = _pick_fase_pastores()
     return load_fase_pastores_from(path)
 
+
 def load_fase_pastores_from(path):
     if not path or not os.path.exists(path):
-        return pd.DataFrame(columns=["FLUIG","DATA_PASTORES","TIPO"])
+        return pd.DataFrame(columns=["FLUIG", "DATA_PASTORES", "TIPO"])
     try:
         df = pd.read_excel(path, dtype=str, engine="openpyxl").fillna("")
     except Exception as e:
         QMessageBox.critical(None, "Erro", str(e))
-        return pd.DataFrame(columns=["FLUIG","DATA_PASTORES","TIPO"])
+        return pd.DataFrame(columns=["FLUIG", "DATA_PASTORES", "TIPO"])
     fcol = next((c for c in df.columns if "fluig" in c.lower()), None)
     dcol = next((c for c in df.columns if "data pastores" in c.lower() or ("pastores" in c.lower() and "data" in c.lower())), None)
     tcol = next((c for c in df.columns if "tipo" in c.lower()), None)
     if not fcol or not dcol or not tcol:
-        return pd.DataFrame(columns=["FLUIG","DATA_PASTORES","TIPO"])
+        return pd.DataFrame(columns=["FLUIG", "DATA_PASTORES", "TIPO"])
     out = df[[fcol, dcol, tcol]].copy()
-    out.columns = ["FLUIG","DATA_PASTORES","TIPO"]
+    out.columns = ["FLUIG", "DATA_PASTORES", "TIPO"]
     for c in out.columns:
         out[c] = out[c].astype(str).str.strip()
     return out
 
+
 # =============================================================================
 # UI helpers
 # =============================================================================
+
 def _paint_status(item, status):
     if status:
         bg = STATUS_COLOR.get(status)
         if bg:
             item.setBackground(bg)
-            yiq = (bg.red()*299 + bg.green()*587 + bg.blue()*114) / 1000
+            yiq = (bg.red() * 299 + bg.green() * 587 + bg.blue() * 114) / 1000
             item.setForeground(QColor("#000000" if yiq >= 160 else "#FFFFFF"))
+
 
 def parse_permissions(perms):
     if isinstance(perms, list):
         return perms
     if isinstance(perms, str):
         s = perms.strip()
-        if s.lower() in ("todos","all","*",""):
+        if s.lower() in ("todos", "all", "*", ""):
             return 'todos'
         try:
             return ast.literal_eval(s)
         except Exception:
-            return [p.strip() for p in s.split(",") if p.strip()] 
+            return [p.strip() for p in s.split(",") if p.strip()]
     return 'todos'
 
-def apply_shadow(w, radius=20, blur=40, color=QColor(0,0,0,100)):
+
+def apply_shadow(w, radius=20, blur=40, color=QColor(0, 0, 0, 100)):
     eff = QGraphicsDropShadowEffect()
     eff.setBlurRadius(blur)
     eff.setXOffset(0)
@@ -248,7 +268,9 @@ def apply_shadow(w, radius=20, blur=40, color=QColor(0,0,0,100)):
     w.setGraphicsEffect(eff)
     w.setStyleSheet(f"border-radius:{radius}px;")
 
+
 # >>> Abrir pasta no SO (Explorer/Finder/Linux)
+
 def open_folder(path: str) -> None:
     """
     Abre 'path' no gerenciador de arquivos do sistema.
@@ -275,9 +297,11 @@ def open_folder(path: str) -> None:
         except Exception:
             pass
 
+
 # =============================================================================
 # CSV / Multas helpers
 # =============================================================================
+
 def ensure_status_cols(df, csv_path=None):
     """
     Garante que existam, para cada coluna de data oficial em DATE_COLS,
@@ -309,11 +333,14 @@ def ensure_status_cols(df, csv_path=None):
 
     return df
 
+
 def _multas_root():
     return _cfg_get("multas_root")
 
+
 def _geral_multas_csv():
     return _cfg_get("geral_multas_csv")
+
 
 def build_multa_dir(infrator, ano, mes, placa, notificacao, fluig):
     # sanitização leve para nome de pasta
@@ -322,6 +349,7 @@ def build_multa_dir(infrator, ano, mes, placa, notificacao, fluig):
         return re.sub(r'[\\/:*?"<>|]+', "_", s)
     sub = f"{_safe(placa)}_{_safe(notificacao)}_FLUIG({_safe(fluig)})"
     return os.path.join(_multas_root(), _safe(infrator), _safe(ano), _safe(mes), sub)
+
 
 def gerar_geral_multas_csv(root=None, output=None):
     root = root or _multas_root()
@@ -345,10 +373,10 @@ def gerar_geral_multas_csv(root=None, output=None):
                         if not os.path.isdir(fdir):
                             continue
                         parts = folder.split('_')
-                        placa = parts[0] if len(parts)>0 else ""
-                        notificacao = parts[1] if len(parts)>1 else ""
+                        placa = parts[0] if len(parts) > 0 else ""
+                        notificacao = parts[1] if len(parts) > 1 else ""
                         fluig = ""
-                        if len(parts)>2 and '(' in parts[2] and ')' in parts[2]:
+                        if len(parts) > 2 and '(' in parts[2] and ')' in parts[2]:
                             fluig = parts[2].split('(')[1].split(')')[0]
                         rows.append({
                             "INFRATOR": infrator,
@@ -370,11 +398,13 @@ def gerar_geral_multas_csv(root=None, output=None):
     os.makedirs(os.path.dirname(output), exist_ok=True)
     df.to_csv(output, index=False)
 
+
 def ensure_base_csv():
     out = _geral_multas_csv()
     if not os.path.exists(out):
         os.makedirs(os.path.dirname(out), exist_ok=True)
         gerar_geral_multas_csv()
+
 
 def build_condutor_dir(nome: str, cpf: str) -> str:
     cond_root = _cfg_get("condutores_root", "")
@@ -383,6 +413,7 @@ def build_condutor_dir(nome: str, cpf: str) -> str:
     key = _only_digits(cpf) or _norm(nome) or "sem_identificacao"
     path = os.path.join(cond_root, key)
     return path
+
 
 def link_multa_em_condutor(nome: str, cpf: str, path_da_multa: str):
     """
@@ -401,9 +432,11 @@ def link_multa_em_condutor(nome: str, cpf: str, path_da_multa: str):
     except Exception:
         pass
 
+
 # =============================================================================
 # DIÁLOGOS (antes em dialogs.py)
 # =============================================================================
+
 class SummaryDialog(QDialog):
     def __init__(self, df):
         super().__init__()
@@ -416,7 +449,7 @@ class SummaryDialog(QDialog):
         cv = QVBoxLayout(card)
         t = QTableWidget()
         t.setColumnCount(2)
-        t.setHorizontalHeaderLabels(["Coluna","Resumo"])
+        t.setHorizontalHeaderLabels(["Coluna", "Resumo"])
         resumo = []
         for col in df.columns:
             try:
@@ -425,15 +458,16 @@ class SummaryDialog(QDialog):
             except Exception:
                 resumo.append((col, f"{df[col].nunique()}"))
         t.setRowCount(len(resumo))
-        for i,(c,val) in enumerate(resumo):
-            t.setItem(i,0,QTableWidgetItem(c))
-            t.setItem(i,1,QTableWidgetItem(val))
+        for i, (c, val) in enumerate(resumo):
+            t.setItem(i, 0, QTableWidgetItem(c))
+            t.setItem(i, 1, QTableWidgetItem(val))
         t.resizeColumnsToContents()
         cv.addWidget(t)
         v.addWidget(card)
         close = QPushButton("Fechar")
         v.addWidget(close)
         close.clicked.connect(self.accept)
+
 
 class ConferirFluigDialog(QDialog):
     def __init__(self, parent, df_left, df_right):
@@ -520,7 +554,7 @@ class ConferirFluigDialog(QDialog):
                 code = str(df.at[i, fcol]).strip()
                 btn = QPushButton("INSERIR")
                 btn.clicked.connect(lambda _, k=code: self._insert_one(k))
-                tbl.setCellWidget(i, len(cols)-1, btn)
+                tbl.setCellWidget(i, len(cols) - 1, btn)
 
         tbl.resizeColumnsToContents()
         tbl.resizeRowsToContents()
@@ -560,9 +594,9 @@ class ConferirFluigDialog(QDialog):
         except Exception:
             pass
         try:
-            fcol = next((c for c in self.df_left.columns if str(c).lower().startswith("nº fluig") or str(c).lower()=="fluig"), None)
+            fcol = next((c for c in self.df_left.columns if str(c).lower().startswith("nº fluig") or str(c).lower() == "fluig"), None)
             if fcol:
-                self.df_left = self.df_left[self.df_left[fcol].astype(str).str.strip()!=str(code).strip()].reset_index(drop=True)
+                self.df_left = self.df_left[self.df_left[fcol].astype(str).str.strip() != str(code).strip()].reset_index(drop=True)
                 self._fill(self.tbl_left, self.df_left, actions_col=True)
         except Exception:
             pass
@@ -571,7 +605,7 @@ class ConferirFluigDialog(QDialog):
         col = None
         for j in range(self.tbl_left.columnCount()):
             name = self.tbl_left.horizontalHeaderItem(j).text().lower()
-            if name.startswith("nº fluig") or name=="fluig":
+            if name.startswith("nº fluig") or name == "fluig":
                 col = j; break
         if col is None:
             return
@@ -582,15 +616,16 @@ class ConferirFluigDialog(QDialog):
         for code in codes:
             self._insert_one(code)
 
+
 class AlertasDialog(QDialog):
     def __init__(self, parent, df_alertas):
         super().__init__(parent)
         self.setWindowTitle("Alertas de Datas")
-        self.resize(960,560)
+        self.resize(960, 560)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
 
         v = QVBoxLayout(self)
-        card = QFrame(); card.setObjectName("glass"); apply_shadow(card, radius=18, blur=60, color=QColor(0,0,0,60))
+        card = QFrame(); card.setObjectName("glass"); apply_shadow(card, radius=18, blur=60, color=QColor(0, 0, 0, 60))
         cv = QVBoxLayout(card)
 
         t = QTableWidget()
@@ -598,7 +633,7 @@ class AlertasDialog(QDialog):
         t.setSortingEnabled(True)
         t.horizontalHeader().setSortIndicatorShown(True)
         t.setColumnCount(7)
-        t.setHorizontalHeaderLabels(["FLUIG","INFRATOR","PLACA","ORGÃO","ETAPA","DATA","STATUS"])
+        t.setHorizontalHeaderLabels(["FLUIG", "INFRATOR", "PLACA", "ORGÃO", "ETAPA", "DATA", "STATUS"])
         t.setRowCount(len(df_alertas))
         for r, row in enumerate(df_alertas):
             for c, val in enumerate(row):
@@ -613,11 +648,14 @@ class AlertasDialog(QDialog):
         close = QPushButton("Fechar"); close.clicked.connect(self.accept)
         v.addWidget(close)
 
+
 # =============================================================================
 # Barra de filtro global com botão "+"
 # =============================================================================
+
 class GlobalFilterBar(QFrame):
     changed = pyqtSignal()
+
     def __init__(self, label_text="Filtro global:"):
         super().__init__()
         self.setObjectName("card")

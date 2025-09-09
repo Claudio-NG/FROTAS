@@ -13,6 +13,18 @@ from PyQt6.QtWidgets import (
     QGridLayout, QScrollArea, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView
 )
 
+# === Utils centralizados ===
+from utils import (
+    apply_shadow,
+    ensure_status_cols,
+    df_apply_global_texts,
+    CheckableComboBox,
+    GlobalFilterBar,
+    DATE_COLS,
+    STATUS_COLOR,
+    _paint_status,
+)
+
 USERS_FILE = "users.csv"
 
 BASE_DIR = os.path.expanduser("~")
@@ -24,20 +36,13 @@ PASTORES_DIR     = os.path.join(APP_DIR, "Pastores")
 
 # Datas oficiais (padrão do Qt)
 DATE_FORMAT = "dd/MM/yyyy"
-DATE_COLS   = ["DATA INDICAÇÃO", "BOLETO", "SGU"]
 
 PORTUGUESE_MONTHS = {
-    1:"Janeiro", 2:"Fevereiro", 3:"Março", 4:"Abril", 5:"Maio", 6:"Junho",
-    7:"Julho", 8:"Agosto", 9:"Setembro", 10:"Outubro", 11:"Novembro", 12:"Dezembro",
+    1: "Janeiro", 2: "Fevereiro", 3: "Março", 4: "Abril", 5: "Maio", 6: "Junho",
+    7: "Julho", 8: "Agosto", 9: "Setembro", 10: "Outubro", 11: "Novembro", 12: "Dezembro",
 }
 
 STATUS_OPS = ["", "Pendente", "Pago", "Vencido"]
-STATUS_COLOR = {
-    "Pago": QColor("#2ecc71"),
-    "Pendente": QColor("#ffd166"),
-    "Vencido": QColor("#ef5350"),
-    "": QColor("#BDBDBD"),
-}
 
 # Órgãos usados no módulo de multas
 ORGAOS = ["DETRAN", "DEMUTRAM", "STTU", "DNIT", "PRF", "SEMUTRAM", "DMUT"]
@@ -86,6 +91,7 @@ def _cfg_load() -> dict:
         data.setdefault(k, v)
     return data
 
+
 def _cfg_save(data: dict) -> None:
     try:
         with open(CFG_PATH, "w", encoding="utf-8") as f:
@@ -93,112 +99,36 @@ def _cfg_save(data: dict) -> None:
     except Exception:
         pass
 
+
 def cfg_get(key: str, default=None):
     data = _cfg_load()
     return data.get(key, default if default is not None else DEFAULTS.get(key))
+
 
 def cfg_set(key: str, value):
     data = _cfg_load()
     data[key] = value
     _cfg_save(data)
 
+
 def cfg_all() -> dict:
     return _cfg_load()
 
-# =========================
-# Pequenos helpers visuais
-# =========================
-from PyQt6.QtWidgets import QGraphicsDropShadowEffect
-
-def apply_shadow(widget, radius=18, blur=40, color=QColor(0, 0, 0, 80)):
-    eff = QGraphicsDropShadowEffect()
-    eff.setOffset(0, 8)
-    eff.setBlurRadius(blur)
-    eff.setColor(color)
-    widget.setGraphicsEffect(eff)
-
-def _paint_status(item: QTableWidgetItem, status: str):
-    st = (status or "").strip()
-    if st in STATUS_COLOR:
-        bg = STATUS_COLOR[st]
-        item.setBackground(bg)
-        yiq = (bg.red()*299 + bg.green()*587 + bg.blue()*114)/1000
-        item.setForeground(QColor("#000000" if yiq >= 160 else "#FFFFFF"))
-
-def ensure_status_cols(df: pd.DataFrame, csv_path: str | None = None) -> pd.DataFrame:
-    """
-    Garante colunas *_STATUS para cada data oficial em DATE_COLS.
-    Se csv_path for fornecido, persiste de volta.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["FLUIG"] + DATE_COLS + [f"{c}_STATUS" for c in DATE_COLS])
-    df = df.copy()
-    for c in DATE_COLS:
-        st = f"{c}_STATUS"
-        if c not in df.columns:
-            df[c] = ""
-        if st not in df.columns:
-            df[st] = ""
-    if csv_path:
-        try:
-            df.to_csv(csv_path, index=False)
-        except Exception:
-            pass
-    return df
-
-def to_qdate_flexible(s: str) -> QDate:
-    s = (s or "").strip()
-    if not s:
-        return QDate()
-    for fmt in ["dd/MM/yyyy","dd-MM-yyyy","yyyy-MM-dd","yyyy/MM/dd"]:
-        q = QDate.fromString(s, fmt)
-        if q.isValid():
-            return q
-    try:
-        dt = pd.to_datetime(s, dayfirst=True, errors="coerce")
-        if pd.notna(dt):
-            return QDate(int(dt.year), int(dt.month), int(dt.day))
-    except Exception:
-        pass
-    return QDate()
-
-def df_apply_global_texts(df: pd.DataFrame, texts: list[str]) -> pd.DataFrame:
-    """
-    Filtro global "contém" (case-insensitive) em TODAS as colunas.
-    Cada caixa: tokens separados por espaço com AND; OR entre colunas.
-    """
-    if df is None or df.empty:
-        return df
-    s_df = df.fillna("").astype(str).apply(lambda col: col.str.lower())
-    mask_total = pd.Series(True, index=df.index)
-    for text in texts:
-        q = (text or "").strip().lower()
-        if not q:
-            continue
-        tokens = [t for t in re.split(r"\s+", q) if t]
-        if not tokens:
-            continue
-        mask_box = pd.Series(True, index=df.index)
-        for tok in tokens:
-            m_tok = pd.Series(False, index=df.index)
-            pat = re.escape(tok)
-            for c in s_df.columns:
-                m_tok |= s_df[c].str.contains(pat, na=False)
-            mask_box &= m_tok
-        mask_total &= mask_box
-    return df[mask_total].copy()
 
 # =========================
 # Login (com “lembrar”)
 # =========================
+
 def _enc(txt: str) -> str:
     return base64.b64encode((txt or "").encode("utf-8")).decode("ascii")
+
 
 def _dec(txt: str) -> str:
     try:
         return base64.b64decode((txt or "").encode("ascii")).decode("utf-8")
     except Exception:
         return ""
+
 
 class AuthService:
     def __init__(self):
@@ -211,6 +141,7 @@ class AuthService:
             return False, "Informe usuário e senha."
         self.current_user = email
         return True, "OK"
+
 
 class LoginView(QDialog):
     def __init__(self, auth_service):
@@ -269,6 +200,7 @@ class LoginView(QDialog):
             cfg_set("remember_flag", "0")
         self.accept()
 
+
 # =========================
 # Aba “Base” (caminhos)
 # =========================
@@ -295,6 +227,7 @@ class _PathRow(QWidget):
 
     def value(self):
         return self.ed.text().strip()
+
 
 class BaseTab(QWidget):
     def __init__(self):
@@ -335,64 +268,17 @@ class BaseTab(QWidget):
             cfg_set(key, row.value())
         QMessageBox.information(self, "Base", "Configurações salvas com sucesso.")
 
+
 # =========================
 # Aba “Alertas”
 # =========================
-class CheckableComboBox(QComboBox):
-    from PyQt6.QtCore import pyqtSignal
-    changed = pyqtSignal()
-    def __init__(self, values):
-        super().__init__()
-        self.set_values(values)
-        self.view().pressed.connect(self._toggle)
-        self._update_text()
-
-    def set_values(self, values):
-        self.blockSignals(True)
-        self.clear()
-        vals = sorted({str(v) for v in values if str(v).strip()})
-        if not vals:
-            self.addItem("(vazio)")
-            idx = self.model().index(0, 0)
-            self.model().setData(idx, Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
-        else:
-            for i, v in enumerate(vals):
-                self.addItem(v)
-                idx = self.model().index(i, 0)
-                self.model().setData(idx, Qt.CheckState.Unchecked, Qt.ItemDataRole.CheckStateRole)
-        self.blockSignals(False)
-        self._update_text()
-
-    def _toggle(self, index):
-        st = self.model().data(index, Qt.ItemDataRole.CheckStateRole)
-        ns = Qt.CheckState.Unchecked if st == Qt.CheckState.Checked else Qt.CheckState.Checked
-        self.model().setData(index, ns, Qt.ItemDataRole.CheckStateRole)
-        self._update_text(); self.changed.emit()
-
-    def selected_values(self):
-        out = []
-        for i in range(self.count()):
-            idx = self.model().index(i, 0)
-            st = self.model().data(idx, Qt.ItemDataRole.CheckStateRole)
-            if st == Qt.CheckState.Checked:
-                out.append(self.itemText(i))
-        return out
-
-    def _update_text(self):
-        n = len(self.selected_values())
-        self.setEditable(True); self.lineEdit().setReadOnly(True)
-        self.lineEdit().setText("Todos" if n == 0 else f"{n} selecionados")
-        self.setEditable(False)
-
 class AlertsTab(QWidget):
- 
     def __init__(self):
         super().__init__()
         self.df_original = pd.DataFrame()
         self.df_filtrado = pd.DataFrame()
         self.mode_filtros = {}
         self.multi_filtros = {}
-        self.global_boxes = []
 
         root = QVBoxLayout(self)
 
@@ -406,24 +292,15 @@ class AlertsTab(QWidget):
         actions.addWidget(btn_reload); actions.addWidget(btn_clear); actions.addStretch(1); actions.addWidget(btn_export)
         hv.addLayout(actions)
 
-        # Filtro global (+)
-        row_global = QHBoxLayout()
-        row_global.addWidget(QLabel("Filtro global:"))
-        def _add_box():
-            le = QLineEdit()
-            le.setPlaceholderText("Digite para filtrar em TODAS as colunas…")
-            le.textChanged.connect(self._apply_filters)
-            self.global_boxes.append(le)
-            row_global.addWidget(le, 1)
-        _add_box()
-        btn_plus = QPushButton("+"); btn_plus.setFixedWidth(28); btn_plus.clicked.connect(_add_box)
-        row_global.addWidget(btn_plus)
-        hv.addLayout(row_global)
+        # Filtro global (+) — usando componente compartilhado
+        self.global_bar = GlobalFilterBar("Filtro global:")
+        self.global_bar.changed.connect(self._apply_filters)
+        hv.addWidget(self.global_bar)
 
         # filtros por coluna
         self.filters_scroll = QScrollArea(); self.filters_scroll.setWidgetResizable(True)
         self.filters_host = QWidget(); self.filters_grid = QGridLayout(self.filters_host)
-        self.filters_grid.setContentsMargins(0,0,0,0)
+        self.filters_grid.setContentsMargins(0, 0, 0, 0)
         self.filters_grid.setHorizontalSpacing(12)
         self.filters_grid.setVerticalSpacing(8)
         self.filters_scroll.setWidget(self.filters_host)
@@ -433,7 +310,7 @@ class AlertsTab(QWidget):
 
         # Tabela
         table_card = QFrame(); table_card.setObjectName("glass")
-        apply_shadow(table_card, radius=18, blur=60, color=QColor(0,0,0,80))
+        apply_shadow(table_card, radius=18, blur=60, color=QColor(0, 0, 0, 80))
         tv = QVBoxLayout(table_card)
         self.tabela = QTableWidget()
         self.tabela.setAlternatingRowColors(True)
@@ -452,7 +329,13 @@ class AlertsTab(QWidget):
             QMessageBox.warning(self, "Alertas", "Caminho do GERAL_MULTAS.csv não configurado.")
             return pd.DataFrame()
 
-        base = ensure_status_cols(pd.read_csv(path, dtype=str).fillna(""), csv_path=path)
+        try:
+            base = pd.read_csv(path, dtype=str).fillna("")
+        except Exception as e:
+            QMessageBox.warning(self, "Alertas", f"Erro lendo CSV: {e}")
+            return pd.DataFrame()
+
+        base = ensure_status_cols(base, csv_path=path)
 
         rows = []
         use_cols = [c for c in DATE_COLS if c in base.columns]  # só DATA INDICAÇÃO / BOLETO / SGU
@@ -460,7 +343,7 @@ class AlertsTab(QWidget):
             fluig = str(r.get("FLUIG", "")).strip()
             infr  = str(r.get("INFRATOR", "") or r.get("NOME", "")).strip()
             placa = str(r.get("PLACA", "")).strip()
-            orgao = str(r.get("ORGÃO", "") or r.get("ORG", "") or r.get("ORGAO", "")).strip()  # 👈 novo
+            orgao = str(r.get("ORGÃO", "") or r.get("ORG", "") or r.get("ORGAO", "")).strip()
 
             for col in use_cols:
                 dt = str(r.get(col, "")).strip()
@@ -468,16 +351,7 @@ class AlertsTab(QWidget):
                 if dt or st:
                     rows.append([fluig, infr, placa, orgao, col, dt, st])
 
-        return pd.DataFrame(rows, columns=["FLUIG","INFRATOR","PLACA","ORGÃO","ETAPA","DATA","STATUS"])
-
-
-
-
-
-
-
-
-
+        return pd.DataFrame(rows, columns=["FLUIG", "INFRATOR", "PLACA", "ORGÃO", "ETAPA", "DATA", "STATUS"])
 
     def recarregar(self):
         self.df_original = self._load_df()
@@ -497,15 +371,28 @@ class AlertsTab(QWidget):
             wrap = QFrame(); v = QVBoxLayout(wrap)
             lab = QLabel(col); lab.setObjectName("colTitle"); v.addWidget(lab)
             line = QHBoxLayout()
-            mode = QComboBox(); mode.addItems(["Todos","Excluir vazios","Somente vazios"]); mode.currentTextChanged.connect(self._apply_filters)
+            mode = QComboBox(); mode.addItems(["Todos", "Excluir vazios", "Somente vazios"]); mode.currentTextChanged.connect(self._apply_filters)
             ms = CheckableComboBox(self.df_original[col].dropna().astype(str).unique()); ms.changed.connect(self._apply_filters)
             line.addWidget(mode); line.addWidget(ms); v.addLayout(line)
             self.mode_filtros[col] = mode; self.multi_filtros[col] = ms
-            self.filters_grid.addWidget(wrap, i//3, i%3)
+            self.filters_grid.addWidget(wrap, i // 3, i % 3)
 
     def limpar_filtros(self):
-        for le in self.global_boxes:
-            le.blockSignals(True); le.clear(); le.blockSignals(False)
+        # limpa filtro global
+        try:
+            for _ in list(self.global_bar._edits):
+                pass
+        except Exception:
+            pass
+        # recria barra (maneira simples de limpar)
+        parent = self.global_bar.parent()
+        parent.layout().removeWidget(self.global_bar)
+        self.global_bar.deleteLater()
+        self.global_bar = GlobalFilterBar("Filtro global:")
+        self.global_bar.changed.connect(self._apply_filters)
+        parent.layout().insertWidget(1, self.global_bar)
+
+        # limpa filtros colunares
         for mode in self.mode_filtros.values():
             mode.blockSignals(True); mode.setCurrentIndex(0); mode.blockSignals(False)
         for ms in self.multi_filtros.values():
@@ -515,7 +402,7 @@ class AlertsTab(QWidget):
 
     def _apply_filters(self):
         df = self.df_original.copy()
-        texts = [le.text() for le in self.global_boxes if le.text().strip()]
+        texts = self.global_bar.values()
         df = df_apply_global_texts(df, texts)
         for col in df.columns:
             mode = self.mode_filtros[col].currentText()
@@ -565,6 +452,7 @@ class AlertsTab(QWidget):
             QMessageBox.information(self, "Exportado", "alertas_filtrado.xlsx criado.")
         except Exception as e:
             QMessageBox.critical(self, "Erro", str(e))
+
 
 # =========================
 # Diálogo de dependências
@@ -622,6 +510,7 @@ class DependenciesDialog(QDialog):
         for k, le in self.edits.items():
             cfg_set(k, le.text().strip())
         self.accept()
+
 
 # =========================
 # Main Window (sem imports pesados no topo)
@@ -698,7 +587,6 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.warning(self, "Condutor", f"Erro abrindo Condutor.\n{e}")
 
-
     # Helpers
     def add_or_focus(self, title, factory):
         for idx in range(self.tab_widget.count()):
@@ -728,7 +616,7 @@ class MainWindow(QMainWindow):
             from multas import InfraMultasWindow
         except ImportError:
             try:
-                from multas import MultasWindow as InfraMultasWindow  # fallback se o nome for diferente
+                from multas import MultasWindow as InfraMultasWindow  # fallback
             except Exception as e:
                 QMessageBox.warning(self, "Multas", f"Não foi possível importar a janela de Multas.\n{e}")
                 return
@@ -773,6 +661,7 @@ def run():
     win = MainWindow(email)
     win.show()
     app.exec()
+
 
 if __name__ == "__main__":
     run()
