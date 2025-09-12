@@ -2,16 +2,16 @@
   "remember_user": "clnogueira@universal.org",
   "remember_pwd": "MTIz",
   "remember_flag": "1",
-  "geral_multas_csv": "/Users/claudionogueira/Documents/GitHub/FROTAS/GERAL_MULTAS.csv",
-  "multas_root": "/Users/claudionogueira/Library/CloudStorage/OneDrive-IgrejaUniversaldoReinodeDeus/VEÍCULOS - RN/MULTAS",
-  "pastores_dir": "/Users/claudionogueira/Library/CloudStorage/OneDrive-IgrejaUniversaldoReinodeDeus/VEÍCULOS - RN/MULTAS",
+  "geral_multas_csv": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/GERAL_MULTAS.csv",
+  "multas_root": "T:\\Veiculos\\VEÍCULOS - RN\\MULTAS",
+  "pastores_dir": "T:\\Veiculos\\VEÍCULOS - RN\\MULTAS",
   "detalhamento_path": "Notificações de Multas - Detalhamento.xlsx",
   "pastores_file": "Notificações de Multas - Fase Pastores.xlsx",
   "condutor_identificado_path": "Notificações de Multas - Condutor Identificado.xlsx",
   "extrato_geral_path": "ExtratoGeral.xlsx",
   "extrato_simplificado_path": "ExtratoSimplificado.xlsx",
   "users_file": "users.csv",
-  "detalhamento2_path": "/Users/claudionogueira/Documents/GitHub/FROTAS/Notificações de Multas - Detalhamento-2.xlsx",
-  "detalhamento1_path": "/Users/claudionogueira/Documents/GitHub/FROTAS/Notificações de Multas - Detalhamento (1).xlsx",
-  "condutor_ident_path": "/Users/claudionogueira/Documents/GitHub/FROTAS/Notificações de Multas - Condutor Identificado.xlsx"
+  "detalhamento2_path": "c:\\Users\\clnogueira\\Desktop\\GITHUB\\FROTAS\\Notificações de Multas - Detalhamento-2.xlsx",
+  "detalhamento1_path": "c:\\Users\\clnogueira\\Desktop\\GITHUB\\FROTAS\\Notificações de Multas - Detalhamento (1).xlsx",
+  "condutor_ident_path": "c:\\Users\\clnogueira\\Desktop\\GITHUB\\FROTAS\\Notificações de Multas - Condutor Identificado.xlsx"
 }

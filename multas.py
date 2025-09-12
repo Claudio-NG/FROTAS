@@ -79,9 +79,467 @@ def _most_frequent_placa(series: pd.Series) -> str:
 def _fmt_money(x):
     return f"{float(x or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-# ============================================================
-# ==============  ENGINE (PLANILHAS → CONSOLIDADO) ===========
-# ============================================================
+
+
+class _SortableItem(QTableWidgetItem):
+    def __init__(self, text: str, sort_key=None):
+        super().__init__(text)
+        self._sort_key = sort_key
+
+    def __lt__(self, other):
+        # garante ordenação numérica/data quando sort_key existir
+        a = getattr(self, "_sort_key", None)
+        b = getattr(other, "_sort_key", None)
+        if a is None or b is None:
+            return super().__lt__(other)
+        return a < b
+
+class MultasGeneralView(QWidget):
+    def __init__(self, parent=None, filtro_nome: str = "", data_ini=None, data_fim=None):
+        super().__init__(parent)
+        self._filtro_nome = filtro_nome
+        self._data_ini = data_ini
+        self._data_fim = data_fim
+
+        root = QVBoxLayout(self)
+
+        ctr = QFrame(); ctr.setObjectName("card"); apply_shadow(ctr, radius=14)
+        cv = QHBoxLayout(ctr); cv.setContentsMargins(10,10,10,10); cv.setSpacing(12)
+
+        cv.addWidget(QLabel("Filtro global:"))
+        self.busca = QLineEdit()
+        self.busca.setPlaceholderText("Digite para filtrar todas as abas…")
+        self.busca.textChanged.connect(self._rebuild_tabs)
+        cv.addWidget(self.busca, 2)
+
+        cv.addSpacing(12)
+        cv.addWidget(QLabel("Período:"))
+
+        self.de_ini = QDateEdit(); self.de_ini.setCalendarPopup(True); self.de_ini.setDisplayFormat(DATE_FORMAT)
+        self.de_ini.setSpecialValueText(""); self.de_ini.setDate(self.de_ini.minimumDate())
+        if self._data_ini:
+            qd = to_qdate_flexible(self._data_ini)
+            if qd.isValid(): self.de_ini.setDate(qd)
+        cv.addWidget(self.de_ini)
+
+        cv.addWidget(QLabel("até"))
+
+        self.de_fim = QDateEdit(); self.de_fim.setCalendarPopup(True); self.de_fim.setDisplayFormat(DATE_FORMAT)
+        self.de_fim.setSpecialValueText(""); self.de_fim.setDate(self.de_fim.minimumDate())
+        if self._data_fim:
+            qd = to_qdate_flexible(self._data_fim)
+            if qd.isValid(): self.de_fim.setDate(qd)
+        cv.addWidget(self.de_fim)
+
+        btn_aplicar = QPushButton("Aplicar período")
+        btn_aplicar.clicked.connect(self._apply_period_and_reload)
+        cv.addWidget(btn_aplicar)
+
+        cv.addStretch(1)
+        root.addWidget(ctr)
+
+        wrap = QFrame(); wrap.setObjectName("glass"); apply_shadow(wrap, radius=18, blur=60)
+        wv = QVBoxLayout(wrap)
+
+        self.kpi_bar = QHBoxLayout()
+        wv.addLayout(self.kpi_bar)
+
+        self.tabs = QTabWidget()
+        wv.addWidget(self.tabs)
+
+        root.addWidget(wrap)
+
+        self._load_engine_data()
+        self._rebuild_kpis()
+        self._rebuild_tabs()
+
+    def _current_period(self):
+        a = self.de_ini.date()
+        b = self.de_fim.date()
+        ai = None if (not a.isValid() or a == self.de_ini.minimumDate()) else a.toString(DATE_FORMAT)
+        bf = None if (not b.isValid() or b == self.de_fim.minimumDate()) else b.toString(DATE_FORMAT)
+        return ai, bf
+
+    def _apply_period_and_reload(self):
+        ai, bf = self._current_period()
+        self._data_ini, self._data_fim = ai, bf
+        self._load_engine_data()
+        self._rebuild_kpis()
+        self._rebuild_tabs()
+
+    def _load_engine_data(self):
+        engine = PlanilhasEngine(parent=self)
+        self.df, self.presence, self.kpis = engine.load_consolidated(
+            filtro_nome=self._filtro_nome,
+            data_ini=self._data_ini,
+            data_fim=self._data_fim
+        )
+        self.df = (self.df if isinstance(self.df, pd.DataFrame) else pd.DataFrame()).fillna("")
+        if "VALOR_NUM" not in self.df.columns:
+            self.df["VALOR_NUM"] = 0.0
+        def _guess_points(v: float) -> int:
+            v = round(float(v or 0), 2)
+            if abs(v - 88.38) <= 0.5:   return 3
+            if abs(v - 130.16) <= 0.8:  return 4
+            if abs(v - 195.23) <= 1.0:  return 5
+            if abs(v - 293.47) <= 1.5:  return 7
+            if v <= 100:   return 3
+            if v <= 160:   return 4
+            if v <= 230:   return 5
+            return 7
+        self.df["PTS"] = self.df["VALOR_NUM"].map(_guess_points)
+        if "Condutor" not in self.df.columns:
+            self.df["Condutor"] = "(sem nome)"
+
+    def _clear_layout(self, layout):
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+    def _fmt_money(self, x):
+        return _fmt_money(x)
+
+    def _kpi_card(self, lab, val):
+        box = QFrame(); box.setObjectName("card"); apply_shadow(box, radius=12, blur=30)
+        v = QVBoxLayout(box)
+        L = QLabel(lab); V = QLabel(val)
+        L.setStyleSheet("font-weight:600"); V.setStyleSheet("font-weight:800; font-size:18px")
+        v.addWidget(L); v.addWidget(V)
+        return box
+
+    def _rebuild_kpis(self):
+        self._clear_layout(self.kpi_bar)
+        total = float(self.df["VALOR_NUM"].sum() or 0.0) if not self.df.empty else 0.0
+        descont = float(self.df.loc[self.df["DESCONTADA"], "VALOR_NUM"].sum() or 0.0) if not self.df.empty else 0.0
+        pend = float(self.df.loc[~self.df["DESCONTADA"], "VALOR_NUM"].sum() or 0.0) if not self.df.empty else 0.0
+        fontes = ", ".join(sorted(self.df["Fontes"].str.split(", ").explode().dropna().unique())) if not self.df.empty else "-"
+        self.kpi_bar.addWidget(self._kpi_card("Multas (qtde)", str(int(len(self.df)))))
+        self.kpi_bar.addWidget(self._kpi_card("Valor total (R$)", self._fmt_money(total)))
+        self.kpi_bar.addWidget(self._kpi_card("Descontado (R$)", self._fmt_money(descont)))
+        self.kpi_bar.addWidget(self._kpi_card("Pendente (R$)", self._fmt_money(pend)))
+        self.kpi_bar.addWidget(self._kpi_card("Fontes", fontes))
+        self.kpi_bar.addStretch(1)
+
+
+    def _table_widget(self, df_top: pd.DataFrame, cols_show: list[str]) -> QTableWidget:
+        t = QTableWidget()
+        t.setAlternatingRowColors(True)
+        t.setSortingEnabled(True)
+        t.horizontalHeader().setSortIndicatorShown(True)
+        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        t.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+
+        t.setColumnCount(len(cols_show))
+        t.setHorizontalHeaderLabels(cols_show)
+        t.setRowCount(len(df_top))
+
+        # Heurísticas de coluna
+        num_cols = {c for c in cols_show if c.upper() in {"VALOR_NUM","PTS","QTDE"} or
+                    any(k in c for k in ["ValorTotal","Descontado_R$","Pendente_R$","% Descontado"])}
+        money_like = {c for c in cols_show if ("R$" in c) or ("Valor" in c) or c.endswith("_R$")}
+        date_cols = {c for c in cols_show if c in {"Data","DT_M"}}
+
+        for i, (_, r) in enumerate(df_top.iterrows()):
+            for j, c in enumerate(cols_show):
+                val = r[c]
+                sort_key = None
+
+                # Datas
+                if c in date_cols:
+                    # pandas Timestamp ou string -> chave numérica (epoch)
+                    if pd.isna(val):
+                        sort_key = float("-inf")
+                        text = ""
+                    else:
+                        if not isinstance(val, pd.Timestamp):
+                            try:
+                                val = pd.to_datetime(val, dayfirst=True, errors="coerce")
+                            except Exception:
+                                val = pd.NaT
+                        if pd.isna(val):
+                            sort_key = float("-inf")
+                            text = ""
+                        else:
+                            sort_key = val.value  # ns
+                            text = val.strftime("%d/%m/%Y")
+
+                # Numéricos (inclui monetário e percentuais)
+                elif c in num_cols:
+                    try:
+                        f = float(val)
+                    except Exception:
+                        # tenta limpar "1.234,56" etc.
+                        s = str(val or "").strip()
+                        s = s.replace(".", "").replace(",", ".")
+                        try:
+                            f = float(s)
+                        except Exception:
+                            f = 0.0
+                    sort_key = f
+                    if c in money_like:
+                        text = self._fmt_money(f)
+                    elif "% Descontado" in c:
+                        text = f"{f:.2f}%"
+                    else:
+                        # inteiro se parecer inteiro
+                        text = str(int(f)) if abs(f - int(f)) < 1e-9 else str(f)
+
+                else:
+                    text = "" if pd.isna(val) else str(val)
+
+                it = _SortableItem(text, sort_key=sort_key)
+                # não editável, alinhamento decente
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                if c in num_cols:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                elif c in date_cols:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.AlignVCenter)
+                else:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+
+                t.setItem(i, j, it)
+
+        t.resizeColumnsToContents()
+        t.horizontalHeader().setStretchLastSection(True)
+        return t
+
+
+
+
+    def _filter_df(self, df_in: pd.DataFrame) -> pd.DataFrame:
+        txt = self.busca.text().strip()
+        if not txt:
+            return df_in
+        txti = txt.lower()
+        def row_match(s):
+            return any(txti in str(x).lower() for x in s)
+        mask = df_in.apply(row_match, axis=1)
+        return df_in[mask]
+
+
+
+    def _rebuild_tabs(self):
+        self.tabs.clear()
+        self._tab_exports.clear()  # zera mapeamento a cada rebuild
+
+        if self.df.empty:
+            self.tabs.addTab(QLabel("Sem dados para exibir."), "—")
+            return
+
+        # ---- Dash por Condutor
+        g = self.df.groupby(self.df["Condutor"].astype(str))
+        dash = pd.DataFrame({
+            "Qtde": g.size(),
+            "ValorTotal": g["VALOR_NUM"].sum(),
+            "Descontado_R$": g.apply(lambda x: x.loc[x["DESCONTADA"], "VALOR_NUM"].sum()),
+            "Pendente_R$": g.apply(lambda x: x.loc[~x["DESCONTADA"], "VALOR_NUM"].sum()),
+            "Pontos": g["PTS"].sum(),
+        }).reset_index().rename(columns={"Condutor": "Condutor"})
+        dash["% Descontado"] = dash.apply(
+            lambda r: (r["Descontado_R$"] / r["ValorTotal"]) * 100 if r["ValorTotal"] else 0.0, axis=1
+        )
+        dash = dash.sort_values(["ValorTotal","Qtde"], ascending=False)
+
+        cols_dash = ["Condutor","Qtde","ValorTotal","Descontado_R$","Pendente_R$","Pontos","% Descontado"]
+        df_dash_f = self._filter_df(dash[cols_dash])
+        tab_dash = self._table_widget(df_dash_f, cols_dash)
+        idx_dash = self.tabs.addTab(tab_dash, "Resumo por Condutor")
+        self._tab_exports[idx_dash] = (df_dash_f, cols_dash)   # export map
+
+        # ---- Consolidado por FLUIG
+        cols_fluig = [c for c in ["FLUIG","Fontes","Status","Data","Placa","Condutor","Infração","Valor","VALOR_NUM","DESCONTADA","PTS"] if c in self.df.columns]
+        df_f = self.df.sort_values(["DT_M","FLUIG"]) if "DT_M" in self.df.columns else self.df.copy()
+        df_f_f = self._filter_df(df_f[cols_fluig])
+        tab_f = self._table_widget(df_f_f, cols_fluig)
+        idx_f = self.tabs.addTab(tab_f, "Consolidado por FLUIG")
+        self._tab_exports[idx_f] = (df_f_f, cols_fluig)        # export map
+
+        # ---- Presença por Fonte (se existir)
+        if not self.presence.empty:
+            p = self.presence.reset_index()
+            cols = [str(c) for c in p.columns]
+            df_p_f = self._filter_df(p[cols])
+            tab_p = self._table_widget(df_p_f, cols)
+            idx_p = self.tabs.addTab(tab_p, "Presença por Fonte")
+            self._tab_exports[idx_p] = (df_p_f, cols)          # export map
+
+        # ---- Total Devedor (Condutor)
+        pend = self.df.loc[~self.df["DESCONTADA"]].copy()
+        if "Placa" not in pend.columns:
+            pend["Placa"] = ""
+        agg = pend.groupby("Condutor").agg({
+            "VALOR_NUM":"sum",
+            "Placa": lambda s: ", ".join(sorted({p for p in s.astype(str) if p.strip()})),
+            "FLUIG": lambda s: ", ".join(sorted({f for f in s.astype(str) if f.strip()})),
+        }).reset_index()
+        agg = agg.rename(columns={"VALOR_NUM":"Valor Pendente R$","Placa":"Placas","FLUIG":"FLUIGs em aberto"})
+        agg = agg.sort_values("Valor Pendente R$", ascending=False)
+        cols_dev = ["Condutor","Placas","Valor Pendente R$","FLUIGs em aberto"]
+        df_dev_f = self._filter_df(agg[cols_dev])
+        tab_dev = self._table_widget(df_dev_f, cols_dev)
+        idx_dev = self.tabs.addTab(tab_dev, "Total Devedor (Condutor)")
+        self._tab_exports[idx_dev] = (df_dev_f, cols_dev)      # export map
+
+        # ---- FLUIG Devedores
+        cols_fd = [c for c in ["FLUIG","Condutor","Valor","VALOR_NUM","Data","Placa"] if c in pend.columns]
+        df_fd = pend[cols_fd].copy().sort_values(["VALOR_NUM","FLUIG"], ascending=False)
+        cols_show_fd = [c for c in ["FLUIG","Condutor","Valor","Data","Placa"] if c in df_fd.columns]
+        df_fd_f = self._filter_df(df_fd[cols_show_fd])
+        tab_fd = self._table_widget(df_fd_f, cols_show_fd)
+        idx_fd = self.tabs.addTab(tab_fd, "FLUIG Devedores")
+        self._tab_exports[idx_fd] = (df_fd_f, cols_show_fd)    # export map
+
+        # ---- Análises completas
+        def mk_full_tab(title, order_col, cols):
+            dfv = dash.sort_values(order_col, ascending=False)
+            dfv_f = self._filter_df(dfv[cols])
+            t = self._table_widget(dfv_f, cols)
+            idx = self.tabs.addTab(t, title)
+            self._tab_exports[idx] = (dfv_f, cols)             # export map
+
+        mk_cols = ["Condutor","Qtde","ValorTotal","Descontado_R$","Pendente_R$","Pontos","% Descontado"]
+        mk_full_tab("Mais Multas (Qtde)", "Qtde", mk_cols)
+        mk_full_tab("Maior Valor", "ValorTotal", mk_cols)
+        mk_full_tab("Mais Descontado R$", "Descontado_R$", mk_cols)
+        mk_full_tab("Menor % Descontado", "% Descontado", mk_cols[::-1])
+
+
+
+
+
+
+
+
+class _InfraTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        # Leitura rápida da planilha Detalhamento com filtros e tabela:
+        path = cfg_get(PlanilhasEngine.KEY_DETALHAMENTO)
+        tbl = QTableWidget()
+        v.addWidget(tbl)
+        df = pd.DataFrame()
+        try:
+            if path and os.path.exists(path):
+                df = pd.read_excel(path, dtype=str).fillna("")
+        except Exception:
+            df = pd.DataFrame()
+        headers = list(df.columns) if not df.empty else []
+        tbl.setColumnCount(len(headers)); tbl.setHorizontalHeaderLabels([str(h) for h in headers])
+        tbl.setRowCount(len(df))
+        for i, (_, r) in enumerate(df.iterrows()):
+            for j, c in enumerate(headers):
+                tbl.setItem(i, j, QTableWidgetItem(str(r[c])))
+        tbl.setAlternatingRowColors(True)
+        tbl.setSortingEnabled(True)
+        tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        tbl.resizeColumnsToContents()
+        tbl.horizontalHeader().setStretchLastSection(True)
+
+
+class _CenarioGeralTabProxy(QWidget):
+
+    def __init__(self, parent_window: "InfraMultasWindow"):
+        super().__init__(parent_window)
+        self._parent_window = parent_window
+        lay = QVBoxLayout(self)
+        lab = QLabel("Abrindo Cenário Geral…")
+        lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(lab)
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        QTimer.singleShot(0, self._open_dialog_then_return)
+
+    def _open_dialog_then_return(self):
+        tabs: QTabWidget = self._parent_window.tabs
+        prev_index = self._parent_window._last_tab_index if hasattr(self._parent_window, "_last_tab_index") else 0
+        self._parent_window.abrir_cenario_geral_dialog()
+        if 0 <= prev_index < tabs.count():
+            tabs.setCurrentIndex(prev_index)
+
+
+class _MultasTab(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        v = QVBoxLayout(self)
+        # Operacional CSV (GERAL_MULTAS.csv) com filtros simples:
+        csv = cfg_get("geral_multas_csv")
+        df = pd.DataFrame()
+        if csv and os.path.exists(csv):
+            try:
+                df = ensure_status_cols(pd.read_csv(csv, dtype=str).fillna(""), csv_path=csv)
+            except Exception:
+                df = pd.DataFrame()
+        top = QFrame(); th = QHBoxLayout(top)
+        btn_recarregar = QPushButton("Recarregar")
+        btn_exportar = QPushButton("Exportar Excel")
+        th.addWidget(btn_recarregar); th.addStretch(1); th.addWidget(btn_exportar)
+        v.addWidget(top)
+
+        self.tbl = QTableWidget(); v.addWidget(self.tbl, 1)
+        self._fill(df)
+
+        def _reload():
+            dfx = pd.DataFrame()
+            try:
+                dfx = ensure_status_cols(pd.read_csv(csv, dtype=str).fillna(""), csv_path=csv)
+            except Exception:
+                dfx = pd.DataFrame()
+            self._fill(dfx)
+        def _export():
+            try:
+                base = os.path.splitext(os.path.basename(csv))[0] if csv else "multas"
+                out = f"{base}_filtrado.xlsx"
+                cur = self._grab_df_from_table()
+                (cur if not cur.empty else df).to_excel(out, index=False)
+                QMessageBox.information(self, "Exportado", f"{out} criado.")
+            except Exception as e:
+                QMessageBox.critical(self, "Erro", str(e))
+
+        btn_recarregar.clicked.connect(_reload)
+        btn_exportar.clicked.connect(_export)
+
+    def _fill(self, df):
+        self.tbl.clear()
+        if df is None or df.empty:
+            self.tbl.setRowCount(0); self.tbl.setColumnCount(0); return
+        headers = [str(c) for c in df.columns]
+        self.tbl.setColumnCount(len(headers))
+        self.tbl.setHorizontalHeaderLabels(headers)
+        self.tbl.setRowCount(len(df))
+        for i, (_, r) in enumerate(df.iterrows()):
+            for j, c in enumerate(headers):
+                it = QTableWidgetItem(str(r[c]))
+                if c.upper().endswith("_STATUS") or c.upper() == "STATUS":
+                    _paint_status(it, str(r[c]))
+                self.tbl.setItem(i, j, it)
+        self.tbl.setAlternatingRowColors(True)
+        self.tbl.setSortingEnabled(True)
+        self.tbl.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        self.tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        self.tbl.resizeColumnsToContents()
+        self.tbl.horizontalHeader().setStretchLastSection(True)
+
+    def _grab_df_from_table(self):
+        rows = self.tbl.rowCount()
+        cols = self.tbl.columnCount()
+        heads = [self.tbl.horizontalHeaderItem(j).text() for j in range(cols)]
+        data = []
+        for i in range(rows):
+            row = []
+            for j in range(cols):
+                it = self.tbl.item(i, j)
+                row.append("" if it is None else it.text())
+            data.append(row)
+        return pd.DataFrame(data, columns=heads)
+
+
+
+
 class PlanilhasEngine:
     """
     Lê as planilhas de multas, consolida por FLUIG (1 linha por multa),
@@ -118,20 +576,17 @@ class PlanilhasEngine:
         self.parent = parent
 
     def _ensure_path(self, key_cfg: str) -> str:
-        # 1) tenta caminho salvo
         p = cfg_get(key_cfg)
         if p and os.path.exists(p):
             return p
 
         def _app_root():
-            # pasta do executável/py principal (mais estável que cwd)
             try:
                 base = os.path.dirname(os.path.abspath(sys.argv[0]))
             except Exception:
                 base = os.getcwd()
             return base
 
-        # 2) tenta achar automaticamente na RAIZ pelos nomes esperados
         root = _app_root()
         prefer = self.LABELS.get(key_cfg, "")
         candidates = []
@@ -688,12 +1143,8 @@ class ExcluirDialog(QDialog):
 
 
 
-# ======== CENÁRIO GERAL (PLANILHAS, sem CSV aqui) — ATUALIZADO ==========
-class MultasGeneralDialog(QDialog):
-    """
-    Cenário geral baseado nas PLANILHAS (Detalhamento, Fase Pastores, Condutor Identificado, etc.),
-    sem uso do CSV. Consolidação por FLUIG + KPIs + Cenários completos + Filtro global + Período.
-    """
+class MultasGeneralDialog(QWidget): 
+
     def __init__(self, parent=None, filtro_nome:str="", data_ini=None, data_fim=None):
         super().__init__(parent)
         self.setWindowTitle("Cenário Geral — Multas (Planilhas)")
@@ -760,8 +1211,13 @@ class MultasGeneralDialog(QDialog):
         self._load_engine_data()
         self._rebuild_kpis()
         self._rebuild_tabs()
+        self.btn_export = QPushButton("Exportar Excel")
+        self.btn_export.clicked.connect(self._export_active_tab)
+        cv.addWidget(self.btn_export)
 
-    # ----------------- Engine & dados base -----------------
+        self._tab_exports = {}    # preenchido em _rebuild_tabs()
+
+
     def _current_period(self):
         a = self.de_ini.date()
         b = self.de_fim.date()
@@ -861,7 +1317,22 @@ class MultasGeneralDialog(QDialog):
         mask = df_in.apply(row_match, axis=1)
         return df_in[mask]
 
-    # ----------------- Abas -----------------
+    def _export_active_tab(self):
+        try:
+            idx = self.tabs.currentIndex()
+            if idx not in self._tab_exports:
+                QMessageBox.information(self, "Exportar", "Nada para exportar nesta aba.")
+                return
+            df, cols = self._tab_exports[idx]
+            # nome amigável por título da aba
+            title = self.tabs.tabText(idx).lower().replace(" ", "_")
+            ts = pd.Timestamp.now().strftime("%Y%m%d_%H%M")
+            out = f"cenario_geral_{title}_{ts}.xlsx"
+            df.to_excel(out, index=False)
+            QMessageBox.information(self, "Exportado", f"{out} criado.")
+        except Exception as e:
+            QMessageBox.critical(self, "Erro ao exportar", str(e))
+
     def _rebuild_tabs(self):
         self.tabs.clear()
         if self.df.empty:
@@ -929,10 +1400,7 @@ class MultasGeneralDialog(QDialog):
         mk_full_tab("Menor % Descontado", "% Descontado", mk_cols[::-1])  # mesma base, ordenação por %
 
 class GeralMultasView(QWidget):
-    """
-    Tabela principal (operacional) baseada no CSV (em aberto),
-    com botão extra de Cenário Geral (planilhas).
-    """
+
     def __init__(self, parent_for_edit=None):
         super().__init__()
         self.parent_for_edit = parent_for_edit
@@ -1036,11 +1504,14 @@ class GeralMultasView(QWidget):
 
     def mostrar_cenario_geral_planilhas(self):
         try:
-            data_ini = None; data_fim = None
-            dlg = MultasGeneralDialog(self, filtro_nome="", data_ini=data_ini, data_fim=data_fim)
-            dlg.exec()
+            if self.parent_for_edit and hasattr(self.parent_for_edit, "tabs"):
+                idx = self.parent_for_edit.tabs.indexOf(self.parent_for_edit.tab_cenario)
+                if idx != -1:
+                    self.parent_for_edit.tabs.setCurrentIndex(idx)
         except Exception as e:
             QMessageBox.critical(self, "Cenário Geral", f"Não foi possível abrir: {e}")
+
+
 
     def limpar_filtros(self):
         self.global_box.blockSignals(True); self.global_box.clear(); self.global_box.blockSignals(False)
@@ -1146,32 +1617,46 @@ class GeralMultasView(QWidget):
             return
         self.parent_for_edit.editar_with_key(key)
 
-# ============================================================
-# ================== JANELA (CONTÊINER) ======================
-# ============================================================
+
 class InfraMultasWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Infrações e Multas")
-        self.resize(1240, 820)
+        self.resize(1280, 860)
 
-        lay = QVBoxLayout(self)
-        self.view_geral = GeralMultasView(self)
-        lay.addWidget(self.view_geral)
+        root = QVBoxLayout(self)
 
-        btn_row = QHBoxLayout()
-        btn_det = QPushButton("Detalhamento")
-        btn_det.clicked.connect(self.abrir_detalhamento)
-        btn_row.addStretch(1)
-        btn_row.addWidget(btn_det)
-        lay.addLayout(btn_row)
+        # --- Abas
+        self.tabs = QTabWidget()
+        root.addWidget(self.tabs, 1)
 
+        # Aba 1: Infrações (visual simples do Detalhamento)
+        self.tab_infracoes = _InfraTab(self)
+        self.tabs.addTab(self.tab_infracoes, "Infrações")
+
+        # Aba 2: Multas (CSV operacional completo)
+        self.tab_multas = GeralMultasView(self)
+        self.tabs.addTab(self.tab_multas, "Multas")
+
+        # Aba 3: Cenário Geral (AGORA É UM WIDGET NA ABA)
+        # IMPORTANTE: a classe abaixo deve herdar QWidget (não QDialog)
+        self.tab_cenario = MultasGeneralDialog(self, filtro_nome="", data_ini=None, data_fim=None)
+        self.tabs.addTab(self.tab_cenario, "Cenário Geral")
+
+        # watcher do CSV para atualizar a aba Multas
         self.watcher = QFileSystemWatcher()
         csv = cfg_get("geral_multas_csv")
         if os.path.exists(csv):
             self.watcher.addPath(csv)
         self.watcher.fileChanged.connect(self._csv_changed)
 
+    # ----- utilitário para o botão "Cenário Geral..." focar a aba
+    def abrir_aba_cenario_geral(self):
+        idx = self.tabs.indexOf(self.tab_cenario)
+        if idx != -1:
+            self.tabs.setCurrentIndex(idx)
+
+    # ===== recarregar a aba Multas quando o CSV muda
     def _csv_changed(self, path):
         if not os.path.exists(path):
             QTimer.singleShot(500, lambda: self._readd_watch(path))
@@ -1184,8 +1669,10 @@ class InfraMultasWindow(QWidget):
         self.reload_geral()
 
     def reload_geral(self):
-        self.view_geral.recarregar()
+        if isinstance(self.tab_multas, GeralMultasView):
+            self.tab_multas.recarregar()
 
+    # ===== Ações usadas pelos botões da aba "Multas"
     def abrir_detalhamento(self):
         try:
             from relatorios import RelatorioWindow
@@ -1201,7 +1688,6 @@ class InfraMultasWindow(QWidget):
         w.show()
 
     def conferir_fluig(self):
-        """Compara FLUIG 'aberta' no Detalhamento (planilha) vs registros no CSV (em aberto)."""
         try:
             detalhamento_path = cfg_get(PlanilhasEngine.KEY_DETALHAMENTO)
             if not detalhamento_path or not os.path.exists(detalhamento_path):
@@ -1268,7 +1754,6 @@ class InfraMultasWindow(QWidget):
         self.reload_geral()
 
     def fase_pastores(self):
-        """Atualiza CSV (SGU/STATUS) com base na planilha Fase Pastores (pagos)."""
         try:
             path = cfg_get(PlanilhasEngine.KEY_FASE_PASTORES)
             if not path or not os.path.exists(path):

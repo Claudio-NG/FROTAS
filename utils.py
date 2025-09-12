@@ -648,11 +648,6 @@ class AlertasDialog(QDialog):
         close = QPushButton("Fechar"); close.clicked.connect(self.accept)
         v.addWidget(close)
 
-
-# =============================================================================
-# Barra de filtro global com botão "+"
-# =============================================================================
-
 class GlobalFilterBar(QFrame):
     changed = pyqtSignal()
 

@@ -1,25 +1,55 @@
-# -*- coding: utf-8 -*-
-# cenarios_gerais.py — Janela de "Cenários Gerais" (Combustível e Multas)
-# Requisitos: pandas, PyQt6, utils.GlobalFilterBar, utils.df_apply_global_texts
-
 import os, re
 import pandas as pd
-from datetime import datetime
 from PyQt6.QtCore import Qt, QDate
 from PyQt6.QtGui import QFont, QColor
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QTabWidget, QFrame, QLabel,
-    QPushButton, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QComboBox, QMessageBox
+    QPushButton, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView, QComboBox,
+    QMessageBox, QFileDialog
 )
 from utils import GlobalFilterBar, df_apply_global_texts
 
 DATE_FORMAT = "dd/MM/yyyy"
 
+
+class NumericItem(QTableWidgetItem):
+    """
+    Item que sabe ordenar numericamente quando tiver um valor float associado.
+    Fallback: compara texto (case-insensitive).
+    """
+    def __init__(self, text: str, num_value: float | None = None):
+        super().__init__(text)
+        self._num = None
+        if num_value is not None:
+            try:
+                self._num = float(num_value)
+            except Exception:
+                self._num = None
+        # torna não-editável
+        self.setFlags(self.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
+    def __lt__(self, other):
+        # Se ambos têm número, compara número
+        if isinstance(other, NumericItem) and self._num is not None and other._num is not None:
+            return self._num < other._num
+        # tenta converter a partir do texto (usa seu _num helper que já normaliza)
+        try:
+            a = float(_num(self.text()))
+            b = float(_num(other.text()))
+            return a < b
+        except Exception:
+            # fallback: texto
+            return self.text().lower() < other.text().lower()
+
+
 def _num(s):
     s = str(s or "").strip()
     if not s: return 0.0
     s = re.sub(r"[^\d,.-]", "", s)
-    s = s.replace(".", "").replace(",", ".") if ("," in s and "." in s) else s.replace(",", ".")
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    else:
+        s = s.replace(",", ".")
     try: return float(s)
     except: return 0.0
 
@@ -36,17 +66,17 @@ def _to_date(s):
 def _norm_placa(x: str) -> str:
     return re.sub(r"[^A-Z0-9]", "", str(x or "").upper())
 
-def _first_nonempty(series: pd.Series) -> str:
-    for x in series:
-        s = str(x or "").strip()
-        if s: return s
-    return ""
+def _fmt_money(x):
+    try:
+        return f"{float(x or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(x)
 
-def _fmt_money(x): 
-    return f"{float(x or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
-
-def _fmt_num(x): 
-    return f"{float(x or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
+def _fmt_num(x):
+    try:
+        return f"{float(x or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(x)
 
 def _guess_points(valor: float) -> int:
     v = float(valor or 0)
@@ -60,17 +90,13 @@ def _guess_points(valor: float) -> int:
     if v <= 230:   return 5
     return 7
 
-# ------------------------ Loader/Normalizer ------------------------
+# --------------------- DataHub ---------------------
 
 class DataHub:
-    """Lê e normaliza todas as fontes necessárias para os cenários gerais."""
     def __init__(self):
-        # Combustível
         self.p_extrato = "ExtratoGeral.xlsx"
         self.p_simpl   = "ExtratoSimplificado.xlsx"
         self.p_resp    = "Responsavel.xlsx"
-
-        # Multas
         self.p_multas_sources = [
             "Notificações de Multas - Detalhamento.xlsx",
             "Notificações de Multas - Detalhamento-2.xlsx",
@@ -79,164 +105,176 @@ class DataHub:
             "Notificações de Multas - Condutor Identificado.xlsx",
         ]
 
-    # ---------- Combustível (Atual) ----------
+    # -------- Responsável ativo (por placa) --------
+    def _map_responsavel_por_placa(self) -> pd.DataFrame:
+        if not os.path.exists(self.p_resp):
+            return pd.DataFrame(columns=["PLACA_N","Responsavel","Modelo","Fabricante","Cidade/UF"])
+        try:
+            df = pd.read_excel(self.p_resp, dtype=str).fillna("")
+        except Exception:
+            return pd.DataFrame(columns=["PLACA_N","Responsavel","Modelo","Fabricante","Cidade/UF"])
+
+        # colunas usuais
+        c_nome = next((c for c in df.columns if c.strip().upper() == "NOME"), None)
+        c_placa = next((c for c in df.columns if c.strip().upper() == "PLACA"), None)
+        c_status = next((c for c in df.columns if c.strip().upper() == "STATUS"), None)
+        c_fim = next((c for c in df.columns if "DATA" in c.upper() and "FIM" in c.upper()), None)
+        c_ini = next((c for c in df.columns if "DATA" in c.upper() and ("INÍC" in c.upper() or "INIC" in c.upper())), None)
+        c_modelo = next((c for c in df.columns if c.strip().upper() == "MODELO"), None)
+        c_marca  = next((c for c in df.columns if c.strip().upper() in ("MARCA","FABRICANTE")), None)
+        c_uf     = next((c for c in df.columns if c.strip().upper() in ("UF","CIDADE/UF")), None)
+
+        if not c_nome or not c_placa:
+            return pd.DataFrame(columns=["PLACA_N","Responsavel","Modelo","Fabricante","Cidade/UF"])
+
+        df["_PL"] = df[c_placa].map(_norm_placa)
+        df["_INI"] = pd.to_datetime(df[c_ini], dayfirst=True, errors="coerce") if c_ini else pd.NaT
+        df["_FIM"] = pd.to_datetime(df[c_fim], dayfirst=True, errors="coerce") if c_fim else pd.NaT
+
+        if c_status:
+            act = df[(df[c_status].astype(str).str.upper() != "VENDIDO") & (df["_FIM"].isna())].copy()
+        else:
+            act = df[df["_FIM"].isna()].copy()
+        if act.empty:
+            act = df.copy()
+        act = act.dropna(subset=["_PL"]).sort_values(["_INI"], ascending=[False])
+
+        g = act.groupby("_PL").first().reset_index()
+        out = pd.DataFrame({
+            "PLACA_N": g["_PL"],
+            "Responsavel": g[c_nome],
+            "Modelo": g[c_modelo] if c_modelo else "",
+            "Fabricante": g[c_marca] if c_marca else "",
+            "Cidade/UF": g[c_uf] if c_uf else "",
+        })
+        return out
+
+    
     def load_combustivel_atual(self) -> pd.DataFrame:
-        """
-        Responsavel + ExtratoSimplificado -> visão atual por responsável (Nome).
-        Retorna DF por responsável com colunas:
-        ['NOME','Limite Atual','Compras','Saldo','Limite Próximo','Placa','Modelo','Fabricante','Cidade/UF']
-        """
-        if not (os.path.exists(self.p_simpl) or os.path.exists(self.p_resp)):
-            return pd.DataFrame(columns=["NOME","Limite Atual","Compras","Saldo","Limite Próximo","Placa","Modelo","Fabricante","Cidade/UF"])
+        if not os.path.exists(self.p_simpl):
+            return pd.DataFrame(columns=[
+                "Responsavel","Placa","Modelo","Fabricante","Cidade/UF",
+                "Limite Atual","Compras","Saldo","Limite Próximo","pctSaldo"
+            ])
+        try:
+            ds = pd.read_excel(self.p_simpl, dtype=str).fillna("")
+        except Exception:
+            return pd.DataFrame(columns=[
+                "Responsavel","Placa","Modelo","Fabricante","Cidade/UF",
+                "Limite Atual","Compras","Saldo","Limite Próximo","pctSaldo"
+            ])
 
-        # Responsável (para trazer placa/modelo e eventualmente cidade)
-        dr = pd.DataFrame()
-        if os.path.exists(self.p_resp):
-            try:
-                dr = pd.read_excel(self.p_resp, dtype=str).fillna("")
-                # normaliza
-                dr = dr.rename(columns={
-                    "NOME":"NOME","PLACA":"Placa","MODELO":"Modelo","MARCA":"Fabricante",
-                    "UF":"Cidade/UF","DATA INÍCIO":"DATA_INI","DATA FIM":"DATA_FIM","STATUS":"STATUS"
-                })
-                if "Cidade/UF" not in dr.columns:
-                    dr["Cidade/UF"] = dr.get("CIDADE", "").astype(str).str.strip()+"/"+dr.get("UF","").astype(str).str.strip()
-            except Exception:
-                dr = pd.DataFrame()
+        # normalização
+        ren = {}
+        for a,b in {
+            "Placa":"Placa","Nome Responsável":"Responsavel","RESPONSÁVEL":"Responsavel","RESPONSAVEL":"Responsavel",
+            "Limite Atual":"Limite Atual","Compras (utilizado)":"Compras","Saldo":"Saldo",
+            "Limite Próximo Período":"Limite Próximo","Modelo":"Modelo","Fabricante":"Fabricante","Cidade/UF":"Cidade/UF"
+        }.items():
+            if a in ds.columns: ren[a] = b
+        ds = ds.rename(columns=ren)
+        ds["PLACA_N"] = ds.get("Placa","").map(_norm_placa)
 
-        # Extrato Simplificado (limites/saldo)
-        ds = pd.DataFrame()
-        if os.path.exists(self.p_simpl):
-            try:
-                ds = pd.read_excel(self.p_simpl, dtype=str).fillna("")
-                ds = ds.rename(columns={
-                    "Nome Responsável":"NOME",
-                    "Limite Atual":"Limite Atual",
-                    "Compras (utilizado)":"Compras",
-                    "Saldo":"Saldo",
-                    "Limite Próximo Período":"Limite Próximo",
-                    "Placa":"Placa","Modelo":"Modelo","Fabricante":"Fabricante","Cidade/UF":"Cidade/UF"
-                })
-            except Exception:
-                ds = pd.DataFrame()
+        for c in ["Limite Atual","Compras","Saldo","Limite Próximo"]:
+            ds[c] = ds.get(c,"").map(_num)
 
-        # Join "aproximado": se houver placa em ambos, prioriza placa; senão, usa NOME
-        out = pd.DataFrame()
-        if not ds.empty:
-            ds["Limite Atual_num"] = ds.get("Limite Atual","").map(_num)
-            ds["Compras_num"]      = ds.get("Compras","").map(_num)
-            ds["Saldo_num"]        = ds.get("Saldo","").map(_num)
-            ds["Limite Próximo_num"] = ds.get("Limite Próximo","").map(_num)
+        # injetar responsável/detalhes a partir de Responsavel.xlsx (prioriza o mapeado por placa)
+        mapa = self._map_responsavel_por_placa()
+        if not mapa.empty:
+            ds = ds.merge(mapa, on="PLACA_N", how="left", suffixes=("","_MAP"))
+            # escolhe: usar do mapa quando vazio
+            ds["Responsavel"] = ds["Responsavel"].where(ds["Responsavel"].astype(str).str.strip()!="", ds["Responsavel_MAP"])
+            for c in ["Modelo","Fabricante","Cidade/UF"]:
+                ds[c] = ds[c].where(ds[c].astype(str).str.strip()!="", ds[f"{c}_MAP"])
+            for c in ["Responsavel_MAP","Modelo_MAP","Fabricante_MAP","Cidade/UF_MAP"]:
+                if c in ds.columns: ds.drop(columns=[c], inplace=True)
 
-            # completa campos com DR (caso exista)
-            if not dr.empty:
-                dr["_PL"] = dr.get("Placa","").map(_norm_placa)
-                ds["_PL"] = ds.get("Placa","").map(_norm_placa)
-                # merge por PL e depois por NOME (left fill)
-                m1 = pd.merge(ds, dr[["NOME","Placa","Modelo","Fabricante","Cidade/UF","_PL"]], on="_PL", how="left", suffixes=("","_DR"))
-                # se NOME vazio no DS, usar NOME_DR
-                m1["NOME"] = m1["NOME"].where(m1["NOME"].astype(str).str.strip()!="", m1.get("NOME_DR",""))
-                # completa campos faltantes com os do DR quando necessário
-                for c in ["Placa","Modelo","Fabricante","Cidade/UF"]:
-                    m1[c] = m1[c].where(m1[c].astype(str).str.strip()!="", m1.get(c+"_DR",""))
-                out = m1
-            else:
-                out = ds.copy()
+        ds["pctSaldo"] = (100.0 * ds["Saldo"] / ds["Limite Atual"]).replace([pd.NA, pd.NaT, float("inf")], 0.0)
 
-        # Seleção final
-        cols = ["NOME","Limite Atual","Compras","Saldo","Limite Próximo","Placa","Modelo","Fabricante","Cidade/UF",
-                "Limite Atual_num","Compras_num","Saldo_num","Limite Próximo_num"]
+        cols = ["Responsavel","Placa","Modelo","Fabricante","Cidade/UF","Limite Atual","Compras","Saldo","Limite Próximo","pctSaldo","PLACA_N"]
         for c in cols:
-            if c not in out.columns: out[c] = "" if not c.endswith("_num") else 0.0
-        return out[cols].copy()
+            if c not in ds.columns: ds[c] = "" if c not in ("Limite Atual","Compras","Saldo","Limite Próximo","pctSaldo") else 0.0
+        return ds[cols].copy()
 
-    # ---------- Combustível (Histórico) ----------
+  
     def load_combustivel_historico(self) -> pd.DataFrame:
-        """
-        ExtratoGeral -> visão histórica por responsável/motorista.
-        Retorna DF de transações com colunas normalizadas:
-        ['DT_C','NOME','PLACA','COMBUSTIVEL','LITROS_NUM','VL_LITRO_NUM','VALOR_NUM','ESTABELECIMENTO','CIDADE_UF']
-        """
         if not os.path.exists(self.p_extrato):
-            return pd.DataFrame(columns=["DT_C","NOME","PLACA","COMBUSTIVEL","LITROS_NUM","VL_LITRO_NUM","VALOR_NUM","ESTABELECIMENTO","CIDADE_UF"])
+            return pd.DataFrame(columns=[
+                "DT","Responsavel","PLACA","PLACA_N","COMBUSTIVEL","LITROS_NUM","VL_LITRO_NUM","VALOR_NUM","ESTABELECIMENTO","CIDADE_UF"
+            ])
         try:
             df = pd.read_excel(self.p_extrato, dtype=str).fillna("")
         except Exception:
-            return pd.DataFrame(columns=["DT_C","NOME","PLACA","COMBUSTIVEL","LITROS_NUM","VL_LITRO_NUM","VALOR_NUM","ESTABELECIMENTO","CIDADE_UF"])
+            return pd.DataFrame(columns=[
+                "DT","Responsavel","PLACA","PLACA_N","COMBUSTIVEL","LITROS_NUM","VL_LITRO_NUM","VALOR_NUM","ESTABELECIMENTO","CIDADE_UF"
+            ])
 
-        # nome do responsável/motorista
-        nome_col = None
-        for c in ("NOME MOTORISTA","Motorista","MOTORISTA","Responsável","RESPONSÁVEL","RESPONSAVEL","Nome Responsável"):
-            if c in df.columns: nome_col = c; break
-        df["NOME"] = df.get(nome_col, "")
-
-        m = {
-            "DATA TRANSACAO":"DATA_TRANSACAO","PLACA":"PLACA",
-            "TIPO COMBUSTIVEL":"COMBUSTIVEL","LITROS":"LITROS","VL/LITRO":"VL_LITRO",
-            "VALOR EMISSAO":"VALOR","NOME ESTABELECIMENTO":"ESTABELECIMENTO",
-            "CIDADE":"CIDADE","UF":"UF","CIDADE/UF":"CIDADE_UF"
-        }
-        use = {k:v for k,v in m.items() if k in df.columns}
-        df = df.rename(columns=use)
+        ren = {}
+        for a,b in {
+            "DATA TRANSACAO":"DATA","PLACA":"PLACA",
+            "NOME MOTORISTA":"Responsavel","Motorista":"Responsavel","MOTORISTA":"Responsavel",
+            "Responsável":"Responsavel","RESPONSÁVEL":"Responsavel","RESPONSAVEL":"Responsavel","Nome Responsável":"Responsavel",
+            "TIPO COMBUSTIVEL":"COMBUSTIVEL","LITROS":"LITROS","VL/LITRO":"VL_LITRO","VALOR EMISSAO":"VALOR",
+            "NOME ESTABELECIMENTO":"ESTABELECIMENTO","CIDADE":"CIDADE","UF":"UF","CIDADE/UF":"CIDADE_UF"
+        }.items():
+            if a in df.columns: ren[a] = b
+        df = df.rename(columns=ren)
 
         if "CIDADE_UF" not in df.columns:
             df["CIDADE_UF"] = df.get("CIDADE","").astype(str).str.strip()+"/"+df.get("UF","").astype(str).str.strip()
 
-        df["DT_C"] = df.get("DATA_TRANSACAO","").map(_to_date)
-        df["LITROS_NUM"] = df.get("LITROS", "").map(_num)
-        df["VL_LITRO_NUM"] = df.get("VL_LITRO", "").map(_num)
-        df["VALOR_NUM"] = df.get("VALOR", "").map(_num)
-        return df[["DT_C","NOME","PLACA","COMBUSTIVEL","LITROS_NUM","VL_LITRO_NUM","VALOR_NUM","ESTABELECIMENTO","CIDADE_UF"]].copy()
+        df["DT"] = df.get("DATA","").map(_to_date)
+        df["LITROS_NUM"]   = df.get("LITROS","").map(_num)
+        df["VL_LITRO_NUM"] = df.get("VL_LITRO","").map(_num)
+        df["VALOR_NUM"]    = df.get("VALOR","").map(_num)
+        df["PLACA_N"]      = df.get("PLACA","").map(_norm_placa)
 
-    # ---------- Multas (Geral) ----------
-    def load_multas_geral(self) -> pd.DataFrame:
-        """
-        Consolida todas as fontes de multas, ignora CANCELADA,
-        marca DESCONTADA pela Fase Pastores,
-        e entrega **UMA LINHA POR FLUIG** preservando 'NOME'.
-        Colunas finais:
-        ['FLUIG','NOME','Status','DT_M','Data_raw','Placa','Infração','VALOR_NUM','DESCONTADA']
-        """
+        # reforça responsável via mapa por placa, quando estiver vazio
+        mapa = self._map_responsavel_por_placa()
+        if not mapa.empty:
+            df = df.merge(mapa[["PLACA_N","Responsavel"]].rename(columns={"Responsavel":"Responsavel_MAP"}), on="PLACA_N", how="left")
+            df["Responsavel"] = df["Responsavel"].where(df["Responsavel"].astype(str).str.strip()!="", df["Responsavel_MAP"])
+            if "Responsavel_MAP" in df.columns: df.drop(columns=["Responsavel_MAP"], inplace=True)
+
+        cols = ["DT","Responsavel","PLACA","PLACA_N","COMBUSTIVEL","LITROS_NUM","VL_LITRO_NUM","VALOR_NUM","ESTABELECIMENTO","CIDADE_UF"]
+        for c in cols:
+            if c not in df.columns: df[c] = "" if c in ("Responsavel","PLACA","PLACA_N","COMBUSTIVEL","ESTABELECIMENTO","CIDADE_UF") else 0.0
+        return df[cols].copy()
+
+    # -------- Multas (consolidado por FLUIG) --------
+    def load_multas(self) -> pd.DataFrame:
         frames = []
         for path in self.p_multas_sources:
-            if not os.path.exists(path): 
-                continue
+            if not os.path.exists(path): continue
             try:
                 df = pd.read_excel(path, dtype=str).fillna("")
             except Exception:
                 continue
 
-            # Nome (se existir)
-            nome_col = None
-            for c in ("Nome","NOME","Responsável","RESPONSÁVEL","RESPONSAVEL"):
-                if c in df.columns: nome_col = c; break
-            tmp_nome = df.get(nome_col, "")
-
-            # ignora CANCELADA
+            nome_col = next((c for c in ("Nome","NOME","Responsável","RESPONSÁVEL","RESPONSAVEL") if c in df.columns), None)
             col_status = next((c for c in df.columns if c.strip().lower() == "status"), None)
             if col_status:
                 df = df[df[col_status].astype(str).str.upper() != "CANCELADA"]
 
-            # colunas essenciais
             col_fluig = next((c for c in df.columns if "FLUIG" in c.upper()), None)
             col_data  = next((c for c in df.columns if "DATA INFRA" in c.upper()), None)
             col_valor = next((c for c in df.columns if "VALOR TOTAL" in c.upper()), None)
             col_inf   = next((c for c in df.columns if c.upper() in ("INFRAÇÃO","INFRACAO")), None)
             col_placa = next((c for c in df.columns if c.strip().upper() == "PLACA"), None)
 
-            tmp = pd.DataFrame()
-            tmp["FLUIG"] = df.get(col_fluig, "")
-            tmp["NOME"]  = tmp_nome
-            tmp["Status"] = df.get(col_status, "")
-            tmp["Data_raw"] = df.get(col_data, "")
-            tmp["Placa"]  = df.get(col_placa, "")
-            tmp["Infração"] = df.get(col_inf, "")
-            tmp["Valor"]  = df.get(col_valor, df.get("Valor", ""))
+            tmp = pd.DataFrame({
+                "FLUIG": df.get(col_fluig, ""),
+                "Responsavel": df.get(nome_col, ""),
+                "Status": df.get(col_status, ""),
+                "Data_raw": df.get(col_data, ""),
+                "Placa": df.get(col_placa, ""),
+                "Infracao": df.get(col_inf, ""),
+                "Valor": df.get(col_valor, df.get("Valor", "")),
+            })
             tmp["VALOR_NUM"] = tmp["Valor"].map(_num)
             tmp["DT_M"] = tmp["Data_raw"].map(_to_date)
             tmp["DESCONTADA"] = False
 
-            # Fase Pastores -> DESCONTADA
             if "Fase Pastores" in os.path.basename(path):
                 col_tipo = next((c for c in df.columns if c.strip().upper() == "TIPO"), None)
                 col_data_past = next((c for c in df.columns if c.strip().upper() == "DATA PASTORES"), None)
@@ -248,164 +286,99 @@ class DataHub:
             frames.append(tmp)
 
         base = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-            columns=["FLUIG","NOME","Status","Data_raw","Placa","Infração","Valor","VALOR_NUM","DT_M","DESCONTADA"]
+            columns=["FLUIG","Responsavel","Status","Data_raw","Placa","Infracao","Valor","VALOR_NUM","DT_M","DESCONTADA"]
         )
         if base.empty:
             return base
 
-        # Consolidação por FLUIG (preserva Nome e demais campos)
         grp = base.groupby(base["FLUIG"].astype(str), dropna=False)
-
-        def agg_nonempty(col): return grp[col].apply(_first_nonempty)
-        def agg_valor(): return grp["VALOR_NUM"].max()  # valor mais alto entre fontes
-        def agg_data(): 
-            return grp["DT_M"].min()
-
         consolidated = pd.DataFrame({
             "FLUIG": grp.apply(lambda g: str(g.name)),
-            "NOME": agg_nonempty("NOME"),
-            "Status": agg_nonempty("Status"),
-            "DT_M": agg_data(),
-            "Data_raw": agg_nonempty("Data_raw"),
-            "Placa": agg_nonempty("Placa"),
-            "Infração": agg_nonempty("Infração"),
-            "VALOR_NUM": agg_valor(),
-            "DESCONTADA": grp["DESCONTADA"].apply(lambda s: bool(s.astype(bool).any())),
+            "Responsavel": grp["Responsavel"].apply(lambda s: next((x for x in s if str(x).strip()), "")),
+            "Status": grp["Status"].apply(lambda s: next((x for x in s if str(x).strip()), "")),
+            "DT_M": grp["DT_M"].min(),
+            "Data_raw": grp["Data_raw"].apply(lambda s: next((x for x in s if str(x).strip()), "")),
+            "Placa": grp["Placa"].apply(lambda s: next((x for x in s if str(x).strip()), "")),
+            "Infracao": grp["Infracao"].apply(lambda s: next((x for x in s if str(x).strip()), "")),
+            "VALOR_NUM": grp["VALOR_NUM"].max(),
+            "DESCONTADA": grp["DESCONTADA"].apply(lambda s: bool(pd.Series(s).astype(bool).any())),
         }).reset_index(drop=True)
-
         return consolidated
 
-# ------------------------ Cálculos Top 10 ------------------------
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTabWidget, QLabel, QMessageBox, QShortcut
+)
+from PyQt6.QtGui import QKeySequence
 
-class Leaderboards:
-    """Gera rankings Top 10 a partir dos DataFrames normalizados do DataHub."""
+class CenariosGeraisContainer(QWidget):
 
-    # ----- Combustível (Atual) -----
-    @staticmethod
-    def top10_saldos(df_atual: pd.DataFrame) -> pd.DataFrame:
-        d = df_atual.copy()
-        d = d[["NOME","Saldo_num","Limite Atual_num","Compras_num","Limite Próximo_num","Placa"]]
-        d = d.sort_values("Saldo_num", ascending=False).head(10)
-        d = d.rename(columns={"Saldo_num":"Saldo (R$)","Limite Atual_num":"Limite Atual (R$)","Compras_num":"Compras (R$)","Limite Próximo_num":"Limite Próx. (R$)"})
-        return d
+    def __init__(self, parent=None, titulo_base: str = "Cenários Gerais"):
+        super().__init__(parent)
+        self.titulo_base = titulo_base
+        self._seq = 0  # contador para nomes das abas
+        self._build_ui()
 
-    @staticmethod
-    def top10_limites(df_atual: pd.DataFrame) -> pd.DataFrame:
-        d = df_atual.copy()
-        d = d[["NOME","Limite Atual_num","Saldo_num","Compras_num","Limite Próximo_num","Placa"]]
-        d = d.sort_values("Limite Atual_num", ascending=False).head(10)
-        d = d.rename(columns={"Limite Atual_num":"Limite Atual (R$)","Saldo_num":"Saldo (R$)","Compras_num":"Compras (R$)","Limite Próximo_num":"Limite Próx. (R$)"})
-        return d
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self.btn_new = QPushButton("Novo Cenário")
+        self.btn_new.setToolTip("Abrir uma nova aba de Cenários Gerais (Ctrl+N)")
+        top.addWidget(QLabel(self.titulo_base))
+        top.addStretch(1)
+        top.addWidget(self.btn_new)
+        layout.addLayout(top)
 
-    @staticmethod
-    def top10_compras(df_atual: pd.DataFrame) -> pd.DataFrame:
-        d = df_atual.copy()
-        d = d[["NOME","Compras_num","Saldo_num","Limite Atual_num","Limite Próximo_num","Placa"]]
-        d = d.sort_values("Compras_num", ascending=False).head(10)
-        d = d.rename(columns={"Compras_num":"Compras (R$)","Saldo_num":"Saldo (R$)","Limite Atual_num":"Limite Atual (R$)","Limite Próximo_num":"Limite Próx. (R$)"})
-        return d
+        self.tabsHost = QTabWidget()
+        self.tabsHost.setTabsClosable(True)
+        self.tabsHost.setMovable(True)
+        self.tabsHost.tabCloseRequested.connect(self._close_tab)
+        layout.addWidget(self.tabsHost, 1)
 
-    # ----- Combustível (Histórico) -----
-    @staticmethod
-    def _agg_hist(df_hist: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        d = df_hist.copy()
-        d = d[(d["DT_C"].notna()) & (d["DT_C"] >= a) & (d["DT_C"] <= b)]
-        if d.empty:
-            return pd.DataFrame(columns=["NOME","Gasto (R$)","Litros","Preço Médio/L","Abastecimentos"])
-        g = d.groupby("NOME", dropna=False).agg(
-            gasto=("VALOR_NUM","sum"),
-            litros=("LITROS_NUM","sum"),
-            abastec=("NOME","count")
-        ).reset_index()
-        # preço médio ponderado
-        # evita divisão por zero
-        tmp = d.copy()
-        tmp["valor_por_litro"] = tmp.apply(lambda r: (r["VALOR_NUM"]/r["LITROS_NUM"]) if r["LITROS_NUM"]>0 else 0.0, axis=1)
-        g_preco = tmp.groupby("NOME")["valor_por_litro"].mean().reset_index().rename(columns={"valor_por_litro":"preco_medio"})
-        g = pd.merge(g, g_preco, on="NOME", how="left")
-        g = g.rename(columns={"gasto":"Gasto (R$)","litros":"Litros","preco_medio":"Preço Médio/L","abastec":"Abastecimentos"})
-        return g
+        # atalhos
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self.new_tab)
+        QShortcut(QKeySequence("Ctrl+W"), self, activated=self._close_current_tab)
 
-    @staticmethod
-    def top10_gasto(df_hist: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        g = Leaderboards._agg_hist(df_hist, a, b)
-        return g.sort_values("Gasto (R$)", ascending=False).head(10)
+        # primeira aba
+        self.new_tab()
 
-    @staticmethod
-    def top10_litros(df_hist: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        g = Leaderboards._agg_hist(df_hist, a, b)
-        return g.sort_values("Litros", ascending=False).head(10)
+        # sinais
+        self.btn_new.clicked.connect(self.new_tab)
 
-    @staticmethod
-    def top10_preco_medio(df_hist: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        g = Leaderboards._agg_hist(df_hist, a, b)
-        return g[g["Preço Médio/L"]>0].sort_values("Preço Médio/L", ascending=False).head(10)
+    # ---- API pública ----
+    def new_tab(self):
+        """Cria uma nova aba com uma instância de CenariosGeraisWindow."""
+        try:
+            page = CenariosGeraisWindow()  # usa sua classe existente (já é QWidget)
+        except Exception as e:
+            QMessageBox.critical(self, "Cenários Gerais", f"Falha ao criar cenário: {e}")
+            return
+        self._seq += 1
+        title = f"{self.titulo_base} {self._seq}"
+        idx = self.tabsHost.addTab(page, title)
+        self.tabsHost.setCurrentIndex(idx)
 
-    @staticmethod
-    def top10_abastecimentos(df_hist: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        g = Leaderboards._agg_hist(df_hist, a, b)
-        return g.sort_values("Abastecimentos", ascending=False).head(10)
+    # ---- helpers ----
+    def _close_tab(self, index: int):
+        w = self.tabsHost.widget(index)
+        self.tabsHost.removeTab(index)
+        if w is not None:
+            w.deleteLater()
+        if self.tabsHost.count() == 0:
+            # opcional: sempre manter ao menos uma aba aberta
+            self.new_tab()
 
-    # ----- Multas (Geral) -----
-    @staticmethod
-    def _agg_multas(df_m: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        d = df_m.copy()
-        # período
-        d = d[(d["DT_M"].notna()) & (d["DT_M"] >= a) & (d["DT_M"] <= b)]
-        if d.empty:
-            return pd.DataFrame(columns=["NOME","Qtde Multas","Valor Total (R$)","Pontos Estimados","Valor Descontado (R$)","Valor Não Descontado (R$)","% Descontado"])
-        grp = d.groupby("NOME", dropna=False)
-        q = grp.size().reset_index(name="Qtde Multas")
-        v = grp["VALOR_NUM"].sum().reset_index(name="Valor Total (R$)")
-        pts = grp["VALOR_NUM"].apply(lambda s: sum(_guess_points(x) for x in s)).reset_index(name="Pontos Estimados")
-        desc = grp.apply(lambda g: float(g.loc[g["DESCONTADA"],"VALOR_NUM"].sum())).reset_index(name="Valor Descontado (R$)")
-        pend = grp.apply(lambda g: float(g.loc[~g["DESCONTADA"],"VALOR_NUM"].sum())).reset_index(name="Valor Não Descontado (R$)")
-        out = q.merge(v, on="NOME").merge(pts, on="NOME").merge(desc, on="NOME").merge(pend, on="NOME")
-        # % descontado
-        out["% Descontado"] = out.apply(
-            lambda r: (100.0 * r["Valor Descontado (R$)"] / r["Valor Total (R$)"]) if r["Valor Total (R$)"]>0 else 0.0,
-            axis=1
-        )
-        return out
-
-    @staticmethod
-    def top10_qtde_multas(df_m: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        g = Leaderboards._agg_multas(df_m, a, b)
-        return g.sort_values("Qtde Multas", ascending=False).head(10)
-
-    @staticmethod
-    def top10_valor_multas(df_m: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        g = Leaderboards._agg_multas(df_m, a, b)
-        return g.sort_values("Valor Total (R$)", ascending=False).head(10)
-
-    @staticmethod
-    def top10_pontos(df_m: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        g = Leaderboards._agg_multas(df_m, a, b)
-        return g.sort_values("Pontos Estimados", ascending=False).head(10)
-
-    @staticmethod
-    def top10_pct_descontado(df_m: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        g = Leaderboards._agg_multas(df_m, a, b)
-        return g.sort_values("% Descontado", ascending=False).head(10)
-
-    @staticmethod
-    def top10_valor_nao_descontado(df_m: pd.DataFrame, a: pd.Timestamp, b: pd.Timestamp) -> pd.DataFrame:
-        g = Leaderboards._agg_multas(df_m, a, b)
-        return g.sort_values("Valor Não Descontado (R$)", ascending=False).head(10)
-
-# ------------------------ UI ------------------------
+    def _close_current_tab(self):
+        idx = self.tabsHost.currentIndex()
+        if idx >= 0:
+            self._close_tab(idx)
 
 class CenariosGeraisWindow(QWidget):
-    """
-    Janela com:
-      - Aba Combustível: alternador (Atual|Histórico) + sub-abas Top10
-      - Aba Multas: sub-abas Top10 (sempre geral; canceladas excluídas)
-      - Período + Filtro Global aplicáveis a todas as visualizações
-    """
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Cenários Gerais — Combustível e Multas")
-        self.resize(1260, 820)
+        self.resize(1280, 860)
 
         self.hub = DataHub()
         self.df_comb_atual = pd.DataFrame()
@@ -416,21 +389,28 @@ class CenariosGeraisWindow(QWidget):
         self._load_all()
         self.apply_all()
 
-    # ------- UI building -------
+
+
+    def _toggle_sort(self, tbl: QTableWidget, col: int):
+        hdr = tbl.horizontalHeader()
+        current_col = hdr.sortIndicatorSection()
+        current_order = hdr.sortIndicatorOrder()
+        if current_col == col:
+            # Alterna
+            new_order = Qt.SortOrder.DescendingOrder if current_order == Qt.SortOrder.AscendingOrder else Qt.SortOrder.AscendingOrder
+        else:
+            # Nova coluna: começa crescente
+            new_order = Qt.SortOrder.AscendingOrder
+        tbl.sortItems(col, new_order)
+
+
+
     def _build_ui(self):
         root = QVBoxLayout(self)
 
         # Header
         head = QFrame(); self._shadow(head, blur=40)
-        hv = QVBoxLayout(head); hv.setContentsMargins(16,16,16,16)
-        t = QLabel("Cenários Gerais — Painel Consolidado"); t.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        t.setFont(QFont("Arial", 20, QFont.Weight.Bold))
-        hv.addWidget(t)
-        root.addWidget(head)
-
-        # Controls bar
-        bar = QFrame(); self._shadow(bar, blur=30)
-        bl = QGridLayout(bar)
+        hv = QGridLayout(head); hv.setContentsMargins(12,12,12,12)
 
         self.de_ini = QDateEdit(); self.de_fim = QDateEdit()
         for de in (self.de_ini, self.de_fim):
@@ -441,93 +421,109 @@ class CenariosGeraisWindow(QWidget):
 
         self.global_bar = GlobalFilterBar("Filtro global:")
         self.btn_refresh = QPushButton("Recarregar Arquivos")
-        self.btn_apply   = QPushButton("Aplicar Período/Filtro")
+        self.btn_apply   = QPushButton("Aplicar")
+        self.btn_export  = QPushButton("Exportar")
+        self.btn_export.setToolTip("Exporta a tabela da sub-aba visível (CSV ou Excel)")
 
-        bl.addWidget(QLabel("Início:"), 0, 0); bl.addWidget(self.de_ini, 0, 1)
-        bl.addWidget(QLabel("Fim:"),    0, 2); bl.addWidget(self.de_fim, 0, 3)
-        bl.addWidget(self.global_bar,   1, 0, 1, 4)
-        bl.addWidget(self.btn_refresh,  2, 0, 1, 2)
-        bl.addWidget(self.btn_apply,    2, 2, 1, 2)
+        
+        hv.addWidget(QLabel("Início:"), 0, 0); hv.addWidget(self.de_ini, 0, 1)
+        hv.addWidget(QLabel("Fim:"),    0, 2); hv.addWidget(self.de_fim, 0, 3)
 
-        root.addWidget(bar)
+        
+        hv.addWidget(self.global_bar,   1, 0, 1, 4)
 
-        # Tabs
-        self.tabs = QTabWidget()
-        root.addWidget(self.tabs, 1)
+        # Linha 2: botões (Exportar ao lado de Aplicar, mesmo padrão)
+        hv.addWidget(self.btn_refresh,  2, 0, 1, 1)
+        hv.addWidget(self.btn_apply,    2, 1, 1, 1)
+        hv.addWidget(self.btn_export,   2, 2, 1, 1)
 
-        # --- Combustível tab ---
+        # dá respiro na última coluna e evita o botão sumir em telas estreitas
+        hv.setColumnStretch(3, 1)
+
+        root.addWidget(head)
+
+        # Tabs raiz
+        self.tabs = QTabWidget(); root.addWidget(self.tabs, 1)
+
+        # ---- Combustível
         self.tab_comb = QWidget(); v1 = QVBoxLayout(self.tab_comb)
         top_line = QHBoxLayout()
         top_line.addWidget(QLabel("Fonte:"))
-        self.cb_fonte = QComboBox(); self.cb_fonte.addItems(["Atual (Responsável + Extrato Simplificado)","Histórico (Extrato Geral)"])
+        self.cb_fonte = QComboBox(); self.cb_fonte.addItems(["Atual (por Placa)","Histórico"])
         top_line.addWidget(self.cb_fonte); top_line.addStretch(1)
         self.lbl_info_comb = QLabel("")
         top_line.addWidget(self.lbl_info_comb)
         v1.addLayout(top_line)
 
         self.tabs_comb = QTabWidget()
-        # sub-abas Combustível
-        self.tbl_saldos = self._mk_table(["NOME","Saldo (R$)","Limite Atual (R$)","Compras (R$)","Limite Próx. (R$)","Placa"])
-        self.tbl_limites = self._mk_table(["NOME","Limite Atual (R$)","Saldo (R$)","Compras (R$)","Limite Próx. (R$)","Placa"])
-        self.tbl_compras = self._mk_table(["NOME","Compras (R$)","Saldo (R$)","Limite Atual (R$)","Limite Próx. (R$)","Placa"])
-        self.tbl_gasto   = self._mk_table(["NOME","Gasto (R$)","Litros","Preço Médio/L","Abastecimentos"])
-        self.tbl_litros  = self._mk_table(["NOME","Litros","Gasto (R$)","Preço Médio/L","Abastecimentos"])
-        self.tbl_preco   = self._mk_table(["NOME","Preço Médio/L","Gasto (R$)","Litros","Abastecimentos"])
-        self.tbl_abast   = self._mk_table(["NOME","Abastecimentos","Gasto (R$)","Litros","Preço Médio/L"])
+        # Atual (por placa)
+        self.tbl_atual = self._mk_table(["Responsável","Placa","Modelo","Fabricante","Cidade/UF",
+                                        "Limite Atual (R$)","Compras (R$)","Saldo (R$)","Limite Próx. (R$)","% Saldo","PLACA_N"])
+        self.tabs_comb.addTab(self._wrap(self.tbl_atual), "Atual • por Placa")
 
-        # grupos de abas conforme fonte
-        self.tabs_comb.addTab(self._wrap(self.tbl_saldos), "Top 10 — Maiores Saldos (Atual)")
-        self.tabs_comb.addTab(self._wrap(self.tbl_limites), "Top 10 — Maiores Limites (Atual)")
-        self.tabs_comb.addTab(self._wrap(self.tbl_compras), "Top 10 — Maiores Compras (Atual)")
-        self.tabs_comb.addTab(self._wrap(self.tbl_gasto),   "Top 10 — Maior Gasto (Hist.)")
-        self.tabs_comb.addTab(self._wrap(self.tbl_litros),  "Top 10 — Mais Litros (Hist.)")
-        self.tabs_comb.addTab(self._wrap(self.tbl_preco),   "Top 10 — Preço Médio/L ↑ (Hist.)")
-        self.tabs_comb.addTab(self._wrap(self.tbl_abast),   "Top 10 — + Abastecimentos (Hist.)")
+        # Histórico: por responsável e por placa
+        self.tbl_hist_resp = self._mk_table(["Responsável","Abastecimentos","Litros","Custo (R$)","R$/L"])
+        self.tbl_hist_placa = self._mk_table(["Placa","Abastecimentos","Litros","Custo (R$)","R$/L"])
+        self.tabs_comb.addTab(self._wrap(self.tbl_hist_resp), "Histórico • por Responsável")
+        self.tabs_comb.addTab(self._wrap(self.tbl_hist_placa), "Histórico • por Placa")
+
+        # Detalhe fixo combustível
+        self.tbl_det_comb = self._mk_table(["DT","Responsável","Placa","Combustível","Litros","R$/L","Valor (R$)","Estabelecimento","Cidade/UF"])
+        self.tabs_comb.addTab(self._wrap(self.tbl_det_comb), "Detalhe (fixo)")
+
         v1.addWidget(self.tabs_comb, 1)
-
         self.tabs.addTab(self.tab_comb, "Combustível")
 
-        # --- Multas tab ---
+        # ---- Multas
         self.tab_multas = QWidget(); v2 = QVBoxLayout(self.tab_multas)
         self.lbl_info_mult = QLabel("Canceladas excluídas.")
         v2.addWidget(self.lbl_info_mult)
 
         self.tabs_mult = QTabWidget()
-        self.tbl_qtde  = self._mk_table(["NOME","Qtde Multas","Valor Total (R$)","Pontos Estimados","% Descontado","Valor Não Descontado (R$)"])
-        self.tbl_valor = self._mk_table(["NOME","Valor Total (R$)","Qtde Multas","Pontos Estimados","% Descontado","Valor Não Descontado (R$)"])
-        self.tbl_pontos= self._mk_table(["NOME","Pontos Estimados","Qtde Multas","Valor Total (R$)","% Descontado","Valor Não Descontado (R$)"])
-        self.tbl_pct   = self._mk_table(["NOME","% Descontado","Valor Descontado (R$)","Valor Total (R$)","Qtde Multas","Pontos Estimados"])
-        self.tbl_nao   = self._mk_table(["NOME","Valor Não Descontado (R$)","Valor Total (R$)","Qtde Multas","Pontos Estimados","% Descontado"])
+        self.tbl_multas_resp = self._mk_table(["Responsável","Qtde Multas","Valor Total (R$)","Pontos Estimados","Valor Descontado (R$)","Valor Não Descontado (R$)","% Descontado"])
+        self.tbl_multas_det = self._mk_table(["FLUIG","Responsável","Status","Data","Placa","Infração","Valor (R$)","Descontada?"])
 
-        self.tabs_mult.addTab(self._wrap(self.tbl_qtde),  "Top 10 — + Multas")
-        self.tabs_mult.addTab(self._wrap(self.tbl_valor), "Top 10 — Maior Valor Total")
-        self.tabs_mult.addTab(self._wrap(self.tbl_pontos),"Top 10 — + Pontos (estim.)")
-        self.tabs_mult.addTab(self._wrap(self.tbl_pct),   "Top 10 — % Descontado")
-        self.tabs_mult.addTab(self._wrap(self.tbl_nao),   "Top 10 — Não Descontado")
+        self.tabs_mult.addTab(self._wrap(self.tbl_multas_resp), "Resumo • por Responsável")
+        self.tabs_mult.addTab(self._wrap(self.tbl_multas_det),  "Detalhe (fixo)")
         v2.addWidget(self.tabs_mult, 1)
 
         self.tabs.addTab(self.tab_multas, "Multas")
 
-        # wiring
+        # sinais
         self.btn_refresh.clicked.connect(self._load_all_and_apply)
         self.btn_apply.clicked.connect(self.apply_all)
         self.cb_fonte.currentIndexChanged.connect(self.apply_combustivel)
+        self.global_bar.changed.connect(self.apply_all)
+        self.de_ini.dateChanged.connect(self.apply_all)
+        self.de_fim.dateChanged.connect(self.apply_all)
+        self.btn_export.clicked.connect(self._export_current_table)
 
-    def goto_multas(self):
-        """Abra direto na aba Multas."""
-        self.tabs.setCurrentWidget(self.tab_multas)
+        # clique nas tabelas para preencher o detalhe fixo
+        self.tbl_hist_resp.cellClicked.connect(self._on_click_hist_resp)
+        self.tbl_hist_placa.cellClicked.connect(self._on_click_hist_placa)
+        self.tbl_atual.cellClicked.connect(self._on_click_atual)
+        self.tbl_multas_resp.cellClicked.connect(self._on_click_multas_resp)
 
-    # ------- helpers UI -------
+
+
+
+
+        # ---------- helpers UI ----------
     def _mk_table(self, headers):
         t = QTableWidget()
         t.setAlternatingRowColors(True)
-        t.setSortingEnabled(True)
-        t.horizontalHeader().setSortIndicatorShown(True)
-        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        t.setSortingEnabled(True)  # manter ligado; a gente desliga/religa no fill
+        hdr = t.horizontalHeader()
+        hdr.setSortIndicatorShown(True)
+        hdr.setSectionsClickable(True)  # garante clique no título
+        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         t.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         t.setColumnCount(len(headers))
         t.setHorizontalHeaderLabels(headers)
+
+        hdr.sectionClicked.connect(lambda idx, tbl=t: self._toggle_sort(tbl, idx))
         return t
+
 
     def _wrap(self, w):
         box = QFrame(); v = QVBoxLayout(box); v.setContentsMargins(6,6,6,6); v.addWidget(w)
@@ -541,7 +537,7 @@ class CenariosGeraisWindow(QWidget):
         eff.setColor(color)
         w.setGraphicsEffect(eff)
 
-    # ------- data loading -------
+    # ---------- data ----------
     def _load_all(self):
         try:
             self.df_comb_atual = self.hub.load_combustivel_atual()
@@ -556,7 +552,7 @@ class CenariosGeraisWindow(QWidget):
             QMessageBox.warning(self, "Cenários Gerais", f"Erro ao carregar Combustível (Histórico): {e}")
 
         try:
-            self.df_multas = self.hub.load_multas_geral()
+            self.df_multas = self.hub.load_multas()
         except Exception as e:
             self.df_multas = pd.DataFrame()
             QMessageBox.warning(self, "Cenários Gerais", f"Erro ao carregar Multas: {e}")
@@ -565,7 +561,7 @@ class CenariosGeraisWindow(QWidget):
         self._load_all()
         self.apply_all()
 
-    # ------- apply filters & fill tables -------
+    # ---------- período / filtro ----------
     def _period(self):
         q0, q1 = self.de_ini.date(), self.de_fim.date()
         a = pd.Timestamp(q0.year(), q0.month(), q0.day())
@@ -574,11 +570,10 @@ class CenariosGeraisWindow(QWidget):
         return a, b
 
     def _global_values(self):
-        try:
-            return self.global_bar.values()
-        except Exception:
-            return []
+        try: return self.global_bar.values()
+        except Exception: return []
 
+    # ---------- apply ----------
     def apply_all(self):
         self.apply_combustivel()
         self.apply_multas()
@@ -586,33 +581,50 @@ class CenariosGeraisWindow(QWidget):
     # Combustível
     def apply_combustivel(self):
         a, b = self._period()
-        fonte_idx = self.cb_fonte.currentIndex()
         glb = self._global_values()
-
+        fonte_idx = self.cb_fonte.currentIndex()
         self.lbl_info_comb.setText(f"Período: {a.strftime('%d/%m/%Y')} a {b.strftime('%d/%m/%Y')} — {'Atual' if fonte_idx==0 else 'Histórico'}")
 
         if fonte_idx == 0:
             d = self.df_comb_atual.copy()
             if not d.empty:
                 d = df_apply_global_texts(d, glb)
-                # Preenche sub-abas "Atual"
-                self._fill(self.tbl_saldos, Leaderboards.top10_saldos(d))
-                self._fill(self.tbl_limites, Leaderboards.top10_limites(d))
-                self._fill(self.tbl_compras, Leaderboards.top10_compras(d))
+                d_show = d.rename(columns={
+                    "Responsavel":"Responsável","Placa":"Placa","Modelo":"Modelo","Fabricante":"Fabricante","Cidade/UF":"Cidade/UF",
+                    "Limite Atual":"Limite Atual (R$)","Compras":"Compras (R$)","Saldo":"Saldo (R$)","Limite Próximo":"Limite Próx. (R$)","pctSaldo":"% Saldo"
+                })
+                d_show["% Saldo"] = d_show["% Saldo"].map(lambda x: f"{float(x or 0):.1f}%")
+                self._fill(self.tbl_atual, d_show[["Responsável","Placa","Modelo","Fabricante","Cidade/UF","Limite Atual (R$)","Compras (R$)","Saldo (R$)","Limite Próx. (R$)","% Saldo","PLACA_N"]])
             else:
-                for t in (self.tbl_saldos,self.tbl_limites,self.tbl_compras): self._fill(t, pd.DataFrame())
+                self._fill(self.tbl_atual, pd.DataFrame())
+            # limpa detalhe
+            self._fill(self.tbl_det_comb, pd.DataFrame())
         else:
             d = self.df_comb_hist.copy()
             if not d.empty:
-                # período + filtro global
-                d = d[(d["DT_C"].notna()) & (d["DT_C"] >= a) & (d["DT_C"] <= b)]
+                d = d[(d["DT"].notna()) & (d["DT"] >= a) & (d["DT"] <= b)]
                 d = df_apply_global_texts(d, glb)
-                self._fill(self.tbl_gasto,  Leaderboards.top10_gasto(d, a, b))
-                self._fill(self.tbl_litros, Leaderboards.top10_litros(d, a, b))
-                self._fill(self.tbl_preco,  Leaderboards.top10_preco_medio(d, a, b))
-                self._fill(self.tbl_abast,  Leaderboards.top10_abastecimentos(d, a, b))
+                # Por responsável
+                g1 = d.groupby(d["Responsavel"].astype(str).str.strip()).agg(
+                    Abastecimentos=("VALOR_NUM","count"),
+                    Litros=("LITROS_NUM","sum"),
+                    Custo=("VALOR_NUM","sum")
+                ).reset_index().rename(columns={"Responsavel":"Responsável", "Custo":"Custo (R$)"})
+                g1["R$/L"] = (g1["Custo (R$)"] / g1["Litros"]).replace([pd.NA, pd.NaT, float("inf")], 0.0)
+                self._fill(self.tbl_hist_resp, g1[["Responsável","Abastecimentos","Litros","Custo (R$)","R$/L"]].sort_values(["Custo (R$)","Abastecimentos"], ascending=[False, False]))
+
+                # Por placa
+                g2 = d.groupby(d["PLACA_N"].astype(str)).agg(
+                    Abastecimentos=("VALOR_NUM","count"),
+                    Litros=("LITROS_NUM","sum"),
+                    Custo=("VALOR_NUM","sum")
+                ).reset_index().rename(columns={"PLACA_N":"Placa", "Custo":"Custo (R$)"})
+                g2["R$/L"] = (g2["Custo (R$)"] / g2["Litros"]).replace([pd.NA, pd.NaT, float("inf")], 0.0)
+                self._fill(self.tbl_hist_placa, g2[["Placa","Abastecimentos","Litros","Custo (R$)","R$/L"]].sort_values(["Custo (R$)","Abastecimentos"], ascending=[False, False]))
             else:
-                for t in (self.tbl_gasto,self.tbl_litros,self.tbl_preco,self.tbl_abast): self._fill(t, pd.DataFrame())
+                self._fill(self.tbl_hist_resp, pd.DataFrame()); self._fill(self.tbl_hist_placa, pd.DataFrame())
+            # limpa detalhe
+            self._fill(self.tbl_det_comb, pd.DataFrame())
 
     # Multas
     def apply_multas(self):
@@ -622,48 +634,266 @@ class CenariosGeraisWindow(QWidget):
 
         d = self.df_multas.copy()
         if d.empty:
-            for t in (self.tbl_qtde,self.tbl_valor,self.tbl_pontos,self.tbl_pct,self.tbl_nao): self._fill(t, pd.DataFrame())
-            return
+            self._fill(self.tbl_multas_resp, pd.DataFrame()); self._fill(self.tbl_multas_det, pd.DataFrame()); return
 
         d = df_apply_global_texts(d, glb)
-        # Período é aplicado nos cálculos internos
+        dm = d[(d["DT_M"].notna()) & (d["DT_M"] >= a) & (d["DT_M"] <= b)]
 
-        self._fill(self.tbl_qtde,  Leaderboards.top10_qtde_multas(d, a, b))
-        self._fill(self.tbl_valor, Leaderboards.top10_valor_multas(d, a, b))
-        self._fill(self.tbl_pontos,Leaderboards.top10_pontos(d, a, b))
+        if dm.empty:
+            self._fill(self.tbl_multas_resp, pd.DataFrame()); self._fill(self.tbl_multas_det, pd.DataFrame()); return
 
-        g = Leaderboards._agg_multas(d, a, b)
-        # % Descontado
-        self._fill(self.tbl_pct, g.sort_values("% Descontado", ascending=False).head(10)[
-            ["NOME","% Descontado","Valor Descontado (R$)","Valor Total (R$)","Qtde Multas","Pontos Estimados"]
-        ])
-        # Não descontado
-        self._fill(self.tbl_nao, g.sort_values("Valor Não Descontado (R$)", ascending=False).head(10)[
-            ["NOME","Valor Não Descontado (R$)","Valor Total (R$)","Qtde Multas","Pontos Estimados","% Descontado"]
-        ])
+        grp = dm.groupby(dm["Responsavel"].astype(str).str.strip())
+        resumo = pd.DataFrame({
+            "Responsável": grp.apply(lambda g: g.name).reset_index(drop=True),
+            "Qtde Multas": grp.size().reset_index(drop=True),
+            "Valor Total (R$)": grp["VALOR_NUM"].sum().reset_index(drop=True),
+            "Pontos Estimados": grp["VALOR_NUM"].apply(lambda s: sum(_guess_points(v) for v in s)).reset_index(drop=True),
+            "Valor Descontado (R$)": grp.apply(lambda g: float(g.loc[g["DESCONTADA"],"VALOR_NUM"].sum())).reset_index(drop=True),
+        })
+        resumo["Valor Não Descontado (R$)"] = resumo["Valor Total (R$)"] - resumo["Valor Descontado (R$)"]
+        resumo["% Descontado"] = resumo.apply(lambda r: (100.0*r["Valor Descontado (R$)"]/r["Valor Total (R$)"]) if r["Valor Total (R$)"]>0 else 0.0, axis=1)
+
+        self._fill(self.tbl_multas_resp, resumo.sort_values(["Valor Total (R$)","Qtde Multas"], ascending=[False, False]))
+
+        # detalhe padrão: todas as multas do período
+        det = dm.copy().rename(columns={
+            "Infracao":"Infração","VALOR_NUM":"Valor (R$)"
+        })
+        det["Data"] = det["DT_M"].dt.strftime("%d/%m/%Y").fillna(det["Data_raw"])
+        det["Descontada?"] = det["DESCONTADA"].map(lambda b: "Sim" if bool(b) else "Não")
+        self._fill(self.tbl_multas_det, det[["FLUIG","Responsavel","Status","Data","Placa","Infração","Valor (R$)","Descontada?"]].sort_values(["Data","FLUIG"]))
+
 
     def _fill(self, tbl: QTableWidget, df: pd.DataFrame):
-        headers = list(df.columns) if not df.empty else [h.text() for h in tbl.horizontalHeaderItem(i) and [tbl.horizontalHeaderItem(i) for i in range(tbl.columnCount())]]
-        tbl.setSortingEnabled(False)
+        tbl.setSortingEnabled(False)  # evita reordenação durante o preenchimento
+
+        if df is None or df.empty:
+            # Mantém headers atuais se possível
+            rows = 0
+            headers = [tbl.horizontalHeaderItem(i).text() for i in range(tbl.columnCount())] if tbl.columnCount() else []
+            if not headers and df is not None and not df.empty:
+                headers = list(df.columns)
+            tbl.clear()
+            if headers:
+                tbl.setColumnCount(len(headers))
+                tbl.setHorizontalHeaderLabels(headers)
+            tbl.setRowCount(rows)
+            tbl.setSortingEnabled(True)
+            return
+
+        headers = list(df.columns)
         tbl.clear()
         tbl.setColumnCount(len(headers))
         tbl.setHorizontalHeaderLabels(headers)
-        n = len(df)
-        tbl.setRowCount(n)
-        for i in range(n):
+        tbl.setRowCount(len(df))
+
+        # Identifica colunas numéricas por convenção do header
+        money_cols = {i for i, c in enumerate(headers) if "R$" in c}
+        pct_cols   = {i for i, c in enumerate(headers) if "%" in c}
+        num_cols   = {i for i, c in enumerate(headers) if c in ("Litros", "R$/L")}
+
+        for i, (_, r) in enumerate(df.iterrows()):
             for j, c in enumerate(headers):
-                v = df.iloc[i][c]
-                if isinstance(v, float) and ("R$" in c or "Preço" in c or "Litros" in c):
-                    if "R$" in c: s = _fmt_money(v)
-                    elif "Litros" in c: s = _fmt_num(v)
-                    else: s = _fmt_num(v)
-                elif isinstance(v, float) and "%" in c:
-                    s = f"{v:.2f}%"
+                v = r[c]
+                # Formatação visual
+                if j in money_cols:
+                    s = _fmt_money(v)
+                elif j in pct_cols:
+                    try:
+                        s = f"{float(v or 0):.1f}%"
+                    except Exception:
+                        s = f"{_fmt_num(v)}%"
+                elif j in num_cols:
+                    s = _fmt_num(v)
                 else:
-                    s = str(v)
-                it = QTableWidgetItem(s)
-                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                    s = "" if pd.isna(v) else str(v)
+
+                # Item
+                if j in money_cols or j in num_cols or j in pct_cols:
+                    # tenta extrair valor numérico para ordenação correta
+                    numv = None
+                    try:
+                        numv = float(v)
+                    except Exception:
+                        try:
+                            numv = float(_num(v))
+                        except Exception:
+                            numv = None
+                    it = NumericItem(s, numv)
+                else:
+                    it = QTableWidgetItem(s)
+                    it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+
                 tbl.setItem(i, j, it)
+
         tbl.resizeColumnsToContents()
         tbl.horizontalHeader().setStretchLastSection(True)
-        tbl.setSortingEnabled(True)
+        tbl.setSortingEnabled(True)   # reativa; clique no título alterna asc/desc
+
+
+
+
+
+
+
+
+
+
+
+    def _export_current_table(self):
+        tbl = self._current_table_widget()
+        if tbl is None:
+            QMessageBox.information(self, "Exportar", "Nada para exportar nesta aba.")
+            return
+
+        # Extrai cabeçalhos
+        headers = [tbl.horizontalHeaderItem(i).text() for i in range(tbl.columnCount())]
+
+        # Constrói DataFrame a partir da grade visível
+        rows = []
+        for i in range(tbl.rowCount()):
+            row = []
+            for j in range(tbl.columnCount()):
+                it = tbl.item(i, j)
+                row.append("" if it is None else it.text())
+            rows.append(row)
+        df = pd.DataFrame(rows, columns=headers)
+
+        # Detecta colunas numéricas por header e normaliza valores para tipos numéricos
+        money_cols = [h for h in headers if "R$" in h]
+        pct_cols   = [h for h in headers if "%" in h]
+        # inclui colunas com nomes que sabemos que são numéricas
+        numeric_named = [h for h in headers if h in ("Litros", "R$/L", "Abastecimentos", "Qtde Multas", "Pontos Estimados",
+                                                    "Valor Total (R$)", "Valor Descontado (R$)", "Valor Não Descontado (R$)")]
+        numeric_cols = list(set(money_cols + pct_cols + numeric_named))
+
+        def _clean_num(x: str):
+            # remove símbolos e normaliza decimal para ponto
+            s = str(x or "").strip()
+            s = s.replace("R$", "").replace("%", "").strip()
+            # troca separadores brasileiros para formato machine
+            s = s.replace(".", "").replace(",", ".")
+            # evita strings vazias
+            try:
+                return float(s)
+            except Exception:
+                try:
+                    return float(_num(s))
+                except Exception:
+                    return None
+
+        for col in numeric_cols:
+            if col in df.columns:
+                df[col] = df[col].map(_clean_num)
+
+        # Dialogo para salvar
+        p, _ = QFileDialog.getSaveFileName(self, "Exportar", "export.xlsx", "Excel (*.xlsx);;CSV (*.csv)")
+        if not p:
+            return
+
+        try:
+            ext = os.path.splitext(p)[1].lower()
+            if ext == ".csv":
+                df.to_csv(p, index=False, encoding="utf-8-sig")
+            else:
+                with pd.ExcelWriter(p, engine="openpyxl") as w:
+                    # Garante que o Pandas não injete tipos errados
+                    df.to_excel(w, index=False, sheet_name="export")
+            QMessageBox.information(self, "Exportar", "Arquivo exportado com sucesso.")
+        except Exception as e:
+            QMessageBox.critical(self, "Exportar", f"Falha ao exportar:\n{e}")
+
+
+
+    def _current_table_widget(self) -> QTableWidget | None:
+        # retorna a QTableWidget da sub-aba visível (Combustível ou Multas)
+        curr = self.tabs.currentWidget()
+        if curr is self.tab_comb:
+            sub = self.tabs_comb.currentIndex()
+            return {
+                0: self.tbl_atual,
+                1: self.tbl_hist_resp,
+                2: self.tbl_hist_placa,
+                3: self.tbl_det_comb
+            }.get(sub)
+        if curr is self.tab_multas:
+            sub = self.tabs_mult.currentIndex()
+            return {
+                0: self.tbl_multas_resp,
+                1: self.tbl_multas_det
+            }.get(sub)
+        return None
+
+    # ---------- handlers de clique para preencher aba fixa ----------
+    def _on_click_hist_resp(self, row, col):
+        # filtra transações históricas pelo responsável clicado
+        try:
+            key = self.tbl_hist_resp.item(row, 0).text()
+        except Exception:
+            return
+        a, b = self._period()
+        d = self.df_comb_hist.copy()
+        d = d[(d["DT"].notna()) & (d["DT"] >= a) & (d["DT"] <= b)]
+        d = d[d["Responsavel"].astype(str).str.strip() == key]
+        det = d.copy()
+        det["DT_STR"] = det["DT"].dt.strftime("%d/%m/%Y %H:%M")
+        show = det.rename(columns={
+            "DT_STR":"DT","Responsavel":"Responsável","PLACA":"Placa","COMBUSTIVEL":"Combustível",
+            "LITROS_NUM":"Litros","VL_LITRO_NUM":"R$/L","VALOR_NUM":"Valor (R$)","ESTABELECIMENTO":"Estabelecimento","CIDADE_UF":"Cidade/UF"
+        })[["DT","Responsável","Placa","Combustível","Litros","R$/L","Valor (R$)","Estabelecimento","Cidade/UF"]]
+        self.tabs_comb.setCurrentWidget(self._wrap(self.tbl_det_comb))  # garante seleção da aba fixa
+        self.tabs_comb.setCurrentIndex(3)
+        self._fill(self.tbl_det_comb, show.sort_values("DT"))
+
+    def _on_click_hist_placa(self, row, col):
+        try:
+            key = self.tbl_hist_placa.item(row, 0).text()
+        except Exception:
+            return
+        a, b = self._period()
+        d = self.df_comb_hist.copy()
+        d = d[(d["DT"].notna()) & (d["DT"] >= a) & (d["DT"] <= b)]
+        d = d[d["PLACA_N"].astype(str) == key]
+        det = d.copy()
+        det["DT_STR"] = det["DT"].dt.strftime("%d/%m/%Y %H:%M")
+        show = det.rename(columns={
+            "DT_STR":"DT","Responsavel":"Responsável","PLACA":"Placa","COMBUSTIVEL":"Combustível",
+            "LITROS_NUM":"Litros","VL_LITRO_NUM":"R$/L","VALOR_NUM":"Valor (R$)","ESTABELECIMENTO":"Estabelecimento","CIDADE_UF":"Cidade/UF"
+        })[["DT","Responsável","Placa","Combustível","Litros","R$/L","Valor (R$)","Estabelecimento","Cidade/UF"]]
+        self.tabs_comb.setCurrentIndex(3)
+        self._fill(self.tbl_det_comb, show.sort_values("DT"))
+
+    def _on_click_atual(self, row, col):
+        # mostra histórico da placa clicada
+        try:
+            placa_n = self.tbl_atual.item(row, self.tbl_atual.columnCount()-1).text()  # PLACA_N está na última coluna
+        except Exception:
+            return
+        a, b = self._period()
+        d = self.df_comb_hist.copy()
+        d = d[(d["DT"].notna()) & (d["DT"] >= a) & (d["DT"] <= b)]
+        d = d[d["PLACA_N"].astype(str) == placa_n]
+        det = d.copy()
+        det["DT_STR"] = det["DT"].dt.strftime("%d/%m/%Y %H:%M")
+        show = det.rename(columns={
+            "DT_STR":"DT","Responsavel":"Responsável","PLACA":"Placa","COMBUSTIVEL":"Combustível",
+            "LITROS_NUM":"Litros","VL_LITRO_NUM":"R$/L","VALOR_NUM":"Valor (R$)","ESTABELECIMENTO":"Estabelecimento","CIDADE_UF":"Cidade/UF"
+        })[["DT","Responsável","Placa","Combustível","Litros","R$/L","Valor (R$)","Estabelecimento","Cidade/UF"]]
+        self.tabs_comb.setCurrentIndex(3)
+        self._fill(self.tbl_det_comb, show.sort_values("DT"))
+
+    def _on_click_multas_resp(self, row, col):
+        try:
+            key = self.tbl_multas_resp.item(row, 0).text()
+        except Exception:
+            return
+        a, b = self._period()
+        dm = self.df_multas.copy()
+        dm = dm[(dm["DT_M"].notna()) & (dm["DT_M"] >= a) & (dm["DT_M"] <= b)]
+        dm = dm[dm["Responsavel"].astype(str).str.strip() == key]
+        det = dm.copy().rename(columns={"Infracao":"Infração","VALOR_NUM":"Valor (R$)"})
+        det["Data"] = det["DT_M"].dt.strftime("%d/%m/%Y").fillna(det["Data_raw"])
+        det["Descontada?"] = det["DESCONTADA"].map(lambda b: "Sim" if bool(b) else "Não")
+        show = det[["FLUIG","Responsavel","Status","Data","Placa","Infração","Valor (R$)","Descontada?"]].sort_values(["Data","FLUIG"])
+        self.tabs_mult.setCurrentIndex(1)
+        self._fill(self.tbl_multas_det, show)

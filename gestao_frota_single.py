@@ -33,7 +33,7 @@ MULTAS_ROOT      = os.path.join(APP_DIR, "Multas")
 GERAL_MULTAS_CSV = os.path.join(MULTAS_ROOT, "geral_multas.csv")
 PASTORES_DIR     = os.path.join(APP_DIR, "Pastores")
 
-# Datas oficiais (padrão do Qt)
+
 DATE_FORMAT = "dd/MM/yyyy"
 
 PORTUGUESE_MONTHS = {

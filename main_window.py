@@ -1,7 +1,10 @@
 # main_window.py
 import os, re
+from multas import InfraMultasWindow
 import pandas as pd
 from pathlib import Path
+
+from cenarios_gerais import CenariosGeraisWindow  
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QMainWindow, QTabWidget, QVBoxLayout, QFrame, QHBoxLayout,
@@ -41,6 +44,12 @@ def _collect_alertas(df):
             if dt or st:
                 linhas.append([fluig, infr, placa, col, dt, st])
     return linhas
+
+
+
+
+
+
 
 
 class AlertsTab(QWidget):
@@ -438,6 +447,12 @@ def _parse_money(s):
         return float(txt)
     except:
         return 0.0
+    
+
+
+    
+
+
 
 
 class CenarioGeralWindow(QWidget):
@@ -994,12 +1009,7 @@ class MultasMenu(QWidget):
 
 
 class MainWindow(QMainWindow):
-    """
-    Janela principal com:
-    - Aba 'Início' contendo os botões grandes (Base, Infrações e Multas, Combustível, Relatórios, Alertas, Condutor)
-    - Abertura de cada módulo em novas abas
-    - Relatórios EXPANSIVOS: cada planilha abre em sua própria aba "Relatório — <nome>"
-    """
+
     def __init__(self, user_email: str | None = None):
         super().__init__()
         self.setWindowTitle("GESTÃO DE FROTAS")
@@ -1081,6 +1091,103 @@ class MainWindow(QMainWindow):
         w = factory()
         self.tab_widget.addTab(w, title)
         self.tab_widget.setCurrentWidget(w)
+
+
+    def open_cenarios_gerais(self):
+
+        for i in range(self.tab_widget.count()):
+            w = self.tab_widget.widget(i)
+            if isinstance(w, CenariosGeraisContainer):
+                self.tab_widget.setCurrentIndex(i)
+                return
+
+        cont = CenariosGeraisContainer(self, titulo_base="Cenários Gerais")
+        idx = self.tab_widget.addTab(cont, "Cenários Gerais")
+        self.tab_widget.setCurrentIndex(idx)
+
+
+
+
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
+    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTabWidget, QLabel, QMessageBox, QShortcut
+)
+from PyQt6.QtGui import QKeySequence
+
+class CenariosGeraisContainer(QWidget):
+    """
+    Contêiner que permite múltiplas abas de 'Cenários Gerais',
+    cada uma com uma instância independente de CenariosGeraisWindow.
+    """
+    def __init__(self, parent=None, titulo_base: str = "Cenários Gerais"):
+        super().__init__(parent)
+        self.titulo_base = titulo_base
+        self._seq = 0  # contador para nomes das abas
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        top = QHBoxLayout()
+        self.btn_new = QPushButton("Novo Cenário")
+        self.btn_new.setToolTip("Abrir uma nova aba de Cenários Gerais (Ctrl+N)")
+        top.addWidget(QLabel(self.titulo_base))
+        top.addStretch(1)
+        top.addWidget(self.btn_new)
+        layout.addLayout(top)
+
+        self.tabsHost = QTabWidget()
+        self.tabsHost.setTabsClosable(True)
+        self.tabsHost.setMovable(True)
+        self.tabsHost.tabCloseRequested.connect(self._close_tab)
+        layout.addWidget(self.tabsHost, 1)
+
+    def close_tab(self, index):
+        """Impede fechar a Home (índice 0); fecha as demais."""
+        if index == 0:
+            return
+        w = self.tab_widget.widget(index)
+        self.tab_widget.removeTab(index)
+        if w is not None:
+            w.deleteLater()
+
+
+        # atalhos
+        QShortcut(QKeySequence("Ctrl+N"), self, activated=self.new_tab)
+        QShortcut(QKeySequence("Ctrl+W"), self, activated=self._close_current_tab)
+
+        # primeira aba
+        self.new_tab()
+
+        # sinais
+        self.btn_new.clicked.connect(self.new_tab)
+
+    # ---- API pública ----
+    def new_tab(self):
+        """Cria uma nova aba com uma instância de CenariosGeraisWindow."""
+        try:
+            page = CenariosGeraisWindow()  # usa sua classe existente (já é QWidget)
+        except Exception as e:
+            QMessageBox.critical(self, "Cenários Gerais", f"Falha ao criar cenário: {e}")
+            return
+        self._seq += 1
+        title = f"{self.titulo_base} {self._seq}"
+        idx = self.tabsHost.addTab(page, title)
+        self.tabsHost.setCurrentIndex(idx)
+
+    def _close_tab(self, index: int):
+        w = self.tabsHost.widget(index)
+        self.tabsHost.removeTab(index)
+        if w is not None:
+            w.deleteLater()
+        if self.tabsHost.count() == 0:
+            # opcional: sempre manter ao menos uma aba aberta
+            self.new_tab()
+
+    def _close_current_tab(self):
+        idx = self.tabsHost.currentIndex()
+        if idx >= 0:
+            self._close_tab(idx)
+
 
     def close_tab(self, index):
         """Impede fechar a Home (índice 0); fecha as demais."""
