@@ -1192,10 +1192,12 @@ class MultasGeneralDialog(QWidget):
         btn_aplicar.clicked.connect(self._apply_period_and_reload)
         cv.addWidget(btn_aplicar)
 
+        self.btn_export = QPushButton("Exportar Excel")
+        self.btn_export.clicked.connect(self._export_current_tab)
+        cv.addWidget(self.btn_export)
         cv.addStretch(1)
         root.addWidget(ctr)
 
-        # ===== KPIs + Tabs
         wrap = QFrame(); wrap.setObjectName("glass"); apply_shadow(wrap, radius=18, blur=60)
         wv = QVBoxLayout(wrap)
 
@@ -1216,6 +1218,52 @@ class MultasGeneralDialog(QWidget):
         cv.addWidget(self.btn_export)
 
         self._tab_exports = {}    # preenchido em _rebuild_tabs()
+
+    def _grab_current_table(self) -> QTableWidget | None:
+        """Retorna a QTableWidget da aba atual (busca direto e recursivo)."""
+        w = self.tabs.currentWidget()
+        if isinstance(w, QTableWidget):
+            return w
+        return w.findChild(QTableWidget)
+
+    def _df_from_table(self, t: QTableWidget) -> pd.DataFrame:
+        """Converte o conteúdo visível da tabela para DataFrame."""
+        cols = t.columnCount()
+        rows = t.rowCount()
+        headers = [(t.horizontalHeaderItem(j).text() if t.horizontalHeaderItem(j) else f"Col{j+1}") for j in range(cols)]
+        data = []
+        for i in range(rows):
+            row = []
+            for j in range(cols):
+                it = t.item(i, j)
+                row.append("" if it is None else it.text())
+            data.append(row)
+        return pd.DataFrame(data, columns=headers)
+
+    def _export_current_tab(self):
+        t = self._grab_current_table()
+        if t is None or t.rowCount() == 0:
+            QMessageBox.information(self, "Exportar", "Nada para exportar nesta aba.")
+            return
+
+        tab_idx = self.tabs.currentIndex()
+        tab_title = self.tabs.tabText(tab_idx).replace("/", "-").replace("\\", "-")
+        sugestao = f"{(tab_title or 'cenario_geral').lower().replace(' ', '_')}.xlsx"
+
+        path, _ = QFileDialog.getSaveFileName(self, "Salvar Excel", sugestao, "Excel (*.xlsx)")
+        if not path:
+            return
+
+        try:
+            df = self._df_from_table(t)
+            df.to_excel(path, index=False)
+            QMessageBox.information(self, "Exportar", f"Arquivo gerado:\n{path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Exportar", f"Falha ao exportar:\n{e}")
+
+
+
+
 
 
     def _current_period(self):
@@ -1256,11 +1304,9 @@ class MultasGeneralDialog(QWidget):
             self.df["VALOR_NUM"] = 0.0
         self.df["PTS"] = self.df["VALOR_NUM"].map(_guess_points)
 
-        # chave de agrupamento principal: Condutor
         if "Condutor" not in self.df.columns:
             self.df["Condutor"] = "(sem nome)"
 
-    # ----------------- UI helpers -----------------
     def _clear_layout(self, layout):
         while layout.count():
             item = layout.takeAt(0)
@@ -1292,20 +1338,36 @@ class MultasGeneralDialog(QWidget):
         self.kpi_bar.addWidget(self._kpi_card("Fontes", fontes))
         self.kpi_bar.addStretch(1)
 
+
     def _table_widget(self, df_top: pd.DataFrame, cols_show: list[str]) -> QTableWidget:
-        t = QTableWidget(); t.setAlternatingRowColors(True); t.setSortingEnabled(True)
+        t = QTableWidget()
+        t.setAlternatingRowColors(True)
+        t.setSortingEnabled(True)
+        t.horizontalHeader().setSortIndicatorShown(True)
+        t.horizontalHeader().setSectionsClickable(True)
         t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        t.setColumnCount(len(cols_show)); t.setHorizontalHeaderLabels(cols_show)
+        t.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+
+        t.setColumnCount(len(cols_show))
+        t.setHorizontalHeaderLabels(cols_show)
         t.setRowCount(len(df_top))
+
         for i, (_, r) in enumerate(df_top.iterrows()):
             for j, c in enumerate(cols_show):
                 val = r[c]
-                if isinstance(val, float):
-                    if ("R$" in c) or ("Valor" in c) or c.endswith("_R$"):
-                        val = self._fmt_money(val)
-                t.setItem(i, j, QTableWidgetItem(str(val)))
-        t.resizeColumnsToContents(); t.horizontalHeader().setStretchLastSection(True)
+                if isinstance(val, float) and (("R$" in c) or ("Valor" in c) or c.endswith("_R$")):
+                    val = self._fmt_money(val)
+                it = QTableWidgetItem("" if pd.isna(val) else str(val))
+                it.setFlags(it.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                t.setItem(i, j, it)
+
+        t.resizeColumnsToContents()
+        t.horizontalHeader().setStretchLastSection(True)
         return t
+
+
+
+
 
     def _filter_df(self, df_in: pd.DataFrame) -> pd.DataFrame:
         txt = self.busca.text().strip()

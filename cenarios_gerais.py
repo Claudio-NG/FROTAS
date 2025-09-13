@@ -731,15 +731,6 @@ class CenariosGeraisWindow(QWidget):
         tbl.setSortingEnabled(True)   # reativa; clique no título alterna asc/desc
 
 
-
-
-
-
-
-
-
-
-
     def _export_current_table(self):
         tbl = self._current_table_widget()
         if tbl is None:
