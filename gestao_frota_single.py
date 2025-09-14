@@ -391,7 +391,6 @@ class AlertsTab(QWidget):
         self.global_bar.changed.connect(self._apply_filters)
         parent.layout().insertWidget(1, self.global_bar)
 
-        # limpa filtros colunares
         for mode in self.mode_filtros.values():
             mode.blockSignals(True); mode.setCurrentIndex(0); mode.blockSignals(False)
         for ms in self.multi_filtros.values():

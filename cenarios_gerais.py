@@ -99,11 +99,10 @@ class DataHub:
         self.p_resp    = "Responsavel.xlsx"
         self.p_multas_sources = [
             "Notificações de Multas - Detalhamento.xlsx",
-            "Notificações de Multas - Detalhamento-2.xlsx",
-            "Notificações de Multas - Detalhamento (1).xlsx",
             "Notificações de Multas - Fase Pastores.xlsx",
             "Notificações de Multas - Condutor Identificado.xlsx",
         ]
+
 
     # -------- Responsável ativo (por placa) --------
     def _map_responsavel_por_placa(self) -> pd.DataFrame:

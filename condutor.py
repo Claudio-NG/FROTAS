@@ -106,14 +106,6 @@ class _Sig(QObject):
 
 # =========================== Janela ===========================
 class CondutorWindow(QWidget):
-    """
-    Busca integrada por condutor:
-    - Extrato Geral (combustível) + ExtratoSimplificado + Responsavel (dados atuais)
-    - Multas: planilhas (Detalhamento, Fase Pastores, Condutor Identificado), consolidando por FLUIG
-    - Combinar/Comparar dois nomes
-    - KPIs + Pontuação (período) e Pontuação Fixa (últimos 12 meses desde hoje)
-    """
-
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Condutor — Busca Integrada (Avançado)")
@@ -122,22 +114,16 @@ class CondutorWindow(QWidget):
         self.sig.ready.connect(self._on_chunk_ready)
         self.sig.error.connect(self._on_error)
 
-        # ---- ARQUIVOS NA RAIZ ----
-        # Combustível
         self.p_extrato = "ExtratoGeral.xlsx"              # ajuste se necessário
         self.p_simpl = "ExtratoSimplificado.xlsx"
         self.p_resp = "Responsavel.xlsx"
 
-        # Multas (várias fontes possíveis)
         self.p_multas_sources = [
             "Notificações de Multas - Detalhamento.xlsx",
-            "Notificações de Multas - Detalhamento-2.xlsx",
-            "Notificações de Multas - Detalhamento (1).xlsx",
             "Notificações de Multas - Fase Pastores.xlsx",
             "Notificações de Multas - Condutor Identificado.xlsx",
         ]
 
-        # DataFrames da visão atual
         self._df_m = pd.DataFrame()   # multas (CONSOLIDADAS por FLUIG)
         self._df_e = pd.DataFrame()   # extrato geral
         self._df_dados = {}           # "Dados atuais do condutor"
@@ -156,7 +142,6 @@ class CondutorWindow(QWidget):
         self._build_ui()
         self._build_completer_source()
 
-        # Estilo básico (pode ajustar para seu tema)
         self.setStyleSheet(
             """
             QFrame#glass { background: rgba(255,255,255,0.5); border-radius: 14px; }
@@ -164,11 +149,9 @@ class CondutorWindow(QWidget):
             """
         )
 
-    # ---------------- UI ----------------
     def _build_ui(self):
         root = QVBoxLayout(self)
 
-        # Cabeçalho
         head = QFrame(); head.setObjectName("glass")
         self._apply_shadow(head)
         hv = QVBoxLayout(head); hv.setContentsMargins(18, 18, 18, 18)
@@ -177,7 +160,6 @@ class CondutorWindow(QWidget):
         hv.addWidget(t)
         root.addWidget(head)
 
-        # Barra de parâmetros
         bar = QFrame(); bar.setObjectName("card"); self._apply_shadow(bar, radius=16, blur=40)
         bl = QGridLayout(bar)
 

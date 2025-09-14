@@ -538,39 +538,25 @@ class _MultasTab(QWidget):
         return pd.DataFrame(data, columns=heads)
 
 
-
-
 class PlanilhasEngine:
-    """
-    Lê as planilhas de multas, consolida por FLUIG (1 linha por multa),
-    marca DESCONTADA a partir da planilha Fase Pastores,
-    e calcula KPIs. Não usa CSV.
-    """
-
-    # nomes usados no cfg_get / cfg_set (mantém com o que você usar na aba Base)
     KEY_DETALHAMENTO   = "detalhamento_path"
-    KEY_DETALHAMENTO2  = "detalhamento2_path"
-    KEY_DETALHAMENTO1  = "detalhamento1_path"
     KEY_FASE_PASTORES  = "pastores_file"
     KEY_COND_IDENT     = "condutor_ident_path"
 
-    # rótulos amigáveis
+
     LABELS = {
         KEY_DETALHAMENTO:  "Notificações de Multas - Detalhamento.xlsx",
-        KEY_DETALHAMENTO2: "Notificações de Multas - Detalhamento-2.xlsx",
-        KEY_DETALHAMENTO1: "Notificações de Multas - Detalhamento (1).xlsx",
         KEY_FASE_PASTORES: "Notificações de Multas - Fase Pastores.xlsx",
         KEY_COND_IDENT:    "Notificações de Multas - Condutor Identificado.xlsx",
     }
 
-    # alias curto exibido na coluna "Fontes"
+
     ALIAS = {
         KEY_DETALHAMENTO:  "Detalhamento",
-        KEY_DETALHAMENTO2: "Detalhamento-2",
-        KEY_DETALHAMENTO1: "Detalhamento(1)",
         KEY_FASE_PASTORES: "Fase Pastores",
         KEY_COND_IDENT:    "Condutor Identificado",
     }
+
 
     def __init__(self, parent=None):
         self.parent = parent
@@ -641,18 +627,15 @@ class PlanilhasEngine:
             if col_nome:
                 df = df[df[col_nome].astype(str).str.contains(re.escape(filtro_nome), case=False, na=False)]
 
-        # ignora CANCELADA (se houver)
         col_status = next((c for c in df.columns if c.strip().lower() == "status"), None)
         if col_status:
             df = df[df[col_status].astype(str).str.upper() != "CANCELADA"]
 
-        # colunas chave detectadas dinamicamente
         col_fluig = next((c for c in df.columns if "FLUIG" in c.upper()), None)
         col_data  = next((c for c in df.columns if "DATA INFRA" in c.upper()), None)
         col_valor = next((c for c in df.columns if "VALOR TOTAL" in c.upper()), None)
         col_inf   = next((c for c in df.columns if c.upper() in ("INFRAÇÃO", "INFRACAO")), None)
         col_placa = next((c for c in df.columns if c.strip().upper() == "PLACA"), None)
-        # NOVO: tentar obter o nome do condutor/pastor
         col_nome  = next((c for c in df.columns if c.strip().upper() in ("NOME", "INFRATOR")), None)
 
         if col_fluig is None:
@@ -691,8 +674,6 @@ class PlanilhasEngine:
     def load_consolidated(self, filtro_nome: str = "", data_ini=None, data_fim=None):
         all_keys = [
             self.KEY_DETALHAMENTO,
-            self.KEY_DETALHAMENTO2,
-            self.KEY_DETALHAMENTO1,
             self.KEY_FASE_PASTORES,
             self.KEY_COND_IDENT,
         ]
@@ -764,9 +745,6 @@ class PlanilhasEngine:
             kpis = {"descontado": desc, "pendente": pend, "qtd": int(len(consolidated))}
         return consolidated, presence, kpis
 
-# ============================================================
-# =================  DIÁLOGOS CSV (operacional) ==============
-# ============================================================
 class InserirDialog(QDialog):
     def __init__(self, parent, prefill_fluig=None):
         super().__init__(parent)
@@ -1141,8 +1119,6 @@ class ExcluirDialog(QDialog):
         QMessageBox.information(self, "Sucesso", "Multa excluída.")
         self.accept()
 
-
-
 class MultasGeneralDialog(QWidget): 
 
     def __init__(self, parent=None, filtro_nome:str="", data_ini=None, data_fim=None):
@@ -1289,7 +1265,6 @@ class MultasGeneralDialog(QWidget):
         )
         self.df = (self.df if isinstance(self.df, pd.DataFrame) else pd.DataFrame()).fillna("")
 
-        # pontos (estimativa)
         def _guess_points(v: float) -> int:
             v = round(float(v or 0), 2)
             if abs(v - 88.38) <= 0.5:   return 3
@@ -1364,10 +1339,6 @@ class MultasGeneralDialog(QWidget):
         t.resizeColumnsToContents()
         t.horizontalHeader().setStretchLastSection(True)
         return t
-
-
-
-
 
     def _filter_df(self, df_in: pd.DataFrame) -> pd.DataFrame:
         txt = self.busca.text().strip()
