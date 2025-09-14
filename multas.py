@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
 )
 
 import sys, glob
-
+from utils import read_table_any  
 from gestao_frota_single import (
     DATE_FORMAT, DATE_COLS, STATUS_COLOR,
     GERAL_MULTAS_CSV, MULTAS_ROOT, PASTORES_DIR, ORGAOS,
@@ -406,24 +406,17 @@ class MultasGeneralView(QWidget):
         mk_full_tab("Menor % Descontado", "% Descontado", mk_cols[::-1])
 
 
-
-
-
-
-
-
 class _InfraTab(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         v = QVBoxLayout(self)
-        # Leitura rápida da planilha Detalhamento com filtros e tabela:
+        from gestao_frota_single import cfg_get
         path = cfg_get(PlanilhasEngine.KEY_DETALHAMENTO)
-        tbl = QTableWidget()
-        v.addWidget(tbl)
+        tbl = QTableWidget(); v.addWidget(tbl)
         df = pd.DataFrame()
         try:
             if path and os.path.exists(path):
-                df = pd.read_excel(path, dtype=str).fillna("")
+                df = read_table_any(path).fillna("")
         except Exception:
             df = pd.DataFrame()
         headers = list(df.columns) if not df.empty else []
@@ -438,6 +431,7 @@ class _InfraTab(QWidget):
         tbl.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         tbl.resizeColumnsToContents()
         tbl.horizontalHeader().setStretchLastSection(True)
+
 
 
 class _CenarioGeralTabProxy(QWidget):
@@ -537,19 +531,17 @@ class _MultasTab(QWidget):
             data.append(row)
         return pd.DataFrame(data, columns=heads)
 
-
 class PlanilhasEngine:
+
     KEY_DETALHAMENTO   = "detalhamento_path"
     KEY_FASE_PASTORES  = "pastores_file"
     KEY_COND_IDENT     = "condutor_ident_path"
 
-
     LABELS = {
-        KEY_DETALHAMENTO:  "Notificações de Multas - Detalhamento.xlsx",
-        KEY_FASE_PASTORES: "Notificações de Multas - Fase Pastores.xlsx",
-        KEY_COND_IDENT:    "Notificações de Multas - Condutor Identificado.xlsx",
+        KEY_DETALHAMENTO:  "Notificações de Multas - Detalhamento",
+        KEY_FASE_PASTORES: "Notificações de Multas - Fase Pastores",
+        KEY_COND_IDENT:    "Notificações de Multas - Condutor Identificado",
     }
-
 
     ALIAS = {
         KEY_DETALHAMENTO:  "Detalhamento",
@@ -557,86 +549,134 @@ class PlanilhasEngine:
         KEY_COND_IDENT:    "Condutor Identificado",
     }
 
-
     def __init__(self, parent=None):
         self.parent = parent
 
     def _ensure_path(self, key_cfg: str) -> str:
+        from gestao_frota_single import cfg_get, cfg_set
         p = cfg_get(key_cfg)
         if p and os.path.exists(p):
             return p
 
         def _app_root():
             try:
-                base = os.path.dirname(os.path.abspath(sys.argv[0]))
+                return os.path.dirname(os.path.abspath(sys.argv[0]))
             except Exception:
-                base = os.getcwd()
-            return base
+                return os.getcwd()
 
         root = _app_root()
-        prefer = self.LABELS.get(key_cfg, "")
+        prefer_base = self.LABELS.get(key_cfg, "")
         candidates = []
 
-        if prefer:
-            candidates.append(os.path.join(root, prefer))
+        # tenta nomes preferidos com várias extensões
+        for ext in (".xlsx", ".xls", ".xlsm", ".csv"):
+            if prefer_base:
+                candidates.append(os.path.join(root, prefer_base + ext))
 
-        kw = self.ALIAS.get(key_cfg, key_cfg)  # usa o alias como palavra-chave
-        patterns = [
-            f"*{kw}*.xlsx", f"*{kw}*.xls", f"*{kw}*.xlsm",
-            f"*{kw.replace(' ', '*')}*.xlsx",
-        ]
-        seen = set()
-        for pat in patterns:
-            for f in glob.glob(os.path.join(root, pat)):
-                if f not in seen and os.path.isfile(f):
-                    candidates.append(f); seen.add(f)
+        # fallback: glob por alias
+        kw = self.ALIAS.get(key_cfg, key_cfg).replace(" ", "*")
+        for pat in (f"*{kw}*.xlsx", f"*{kw}*.xls", f"*{kw}*.xlsm", f"*{kw}*.csv"):
+            candidates.extend([f for f in glob.glob(os.path.join(root, pat)) if os.path.isfile(f)])
 
+        # primeiro que existir vira o caminho oficial
         for c in candidates:
             if os.path.exists(c):
                 cfg_set(key_cfg, c)
                 return c
 
+        # diálogo aceitando csv
         sel, _ = QFileDialog.getOpenFileName(
             self.parent,
             f"Selecione a planilha — {self.LABELS.get(key_cfg, key_cfg)}",
             root,
-            "Arquivos Excel (*.xlsx *.xls *.xlsm)"
+            "Planilhas (*.xlsx *.xls *.xlsm *.csv)"
         )
         if sel:
             cfg_set(key_cfg, sel)
             return sel
         return ""
 
-    # ---------- Lê 1 fonte e normaliza ----------
+    def _num(self, s):
+        import re
+        s = str(s or "").strip()
+        if not s:
+            return 0.0
+        s = re.sub(r"[^\d,.-]", "", s)
+        s = s.replace(".", "").replace(",", ".") if ("," in s and "." in s) else s.replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
+
+    def _to_date(self, s):
+        s = str(s or "").strip()
+        if not s:
+            return pd.NaT
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                return pd.to_datetime(s, format=fmt, errors="raise")
+            except Exception:
+                pass
+        return pd.to_datetime(s, dayfirst=True, errors="coerce")
+
+    def _norm_placa(self, x: str) -> str:
+        import re
+        return re.sub(r"[^A-Z0-9]", "", str(x or "").upper())
+
+    def _first_nonempty(self, series: pd.Series) -> str:
+        for x in series:
+            s = str(x or "").strip()
+            if s:
+                return s
+        return ""
+
+    def _most_frequent_placa(self, series: pd.Series) -> str:
+        vals = series.fillna("").astype(str).tolist()
+        if not vals:
+            return ""
+        norm_map = {}
+        for v in vals:
+            n = self._norm_placa(v)
+            norm_map.setdefault(n, []).append(v.strip())
+        if not norm_map:
+            return ""
+        key = max(norm_map.keys(), key=lambda k: len(norm_map[k]))
+        formas = norm_map[key]
+        with_hyphen = [f for f in formas if "-" in f]
+        return with_hyphen[0] if with_hyphen else formas[0]
+
+    # ---------- Lê 1 fonte (CSV/Excel) e normaliza ----------
     def _read_one_source(self, key_cfg: str, filtro_nome: str = "") -> pd.DataFrame:
         path = self._ensure_path(key_cfg)
         if not path or not os.path.exists(path):
             return pd.DataFrame()
-        try:
-            df = pd.read_excel(path, dtype=str).fillna("")
-        except Exception as e:
-            QMessageBox.warning(self.parent, "Planilhas", f"Erro ao ler {os.path.basename(path)}:\n{e}")
+
+        df = read_table_any(path)
+        if df.empty:
             return pd.DataFrame()
 
-        # filtro por nome, quando houver coluna compatível
+        # filtro por nome (quando existir coluna compatível)
         if filtro_nome.strip():
             col_nome = None
-            for c in ("Nome", "NOME", "INFRATOR", "Infrator"):
+            for c in ("Nome", "NOME", "INFRATOR", "Infrator", "Condutor"):
                 if c in df.columns:
                     col_nome = c; break
             if col_nome:
+                import re
                 df = df[df[col_nome].astype(str).str.contains(re.escape(filtro_nome), case=False, na=False)]
 
+        # remove CANCELADA
         col_status = next((c for c in df.columns if c.strip().lower() == "status"), None)
         if col_status:
             df = df[df[col_status].astype(str).str.upper() != "CANCELADA"]
 
+        # mapeia colunas
         col_fluig = next((c for c in df.columns if "FLUIG" in c.upper()), None)
         col_data  = next((c for c in df.columns if "DATA INFRA" in c.upper()), None)
         col_valor = next((c for c in df.columns if "VALOR TOTAL" in c.upper()), None)
         col_inf   = next((c for c in df.columns if c.upper() in ("INFRAÇÃO", "INFRACAO")), None)
         col_placa = next((c for c in df.columns if c.strip().upper() == "PLACA"), None)
-        col_nome  = next((c for c in df.columns if c.strip().upper() in ("NOME", "INFRATOR")), None)
+        col_nome  = next((c for c in df.columns if c.strip().upper() in ("NOME", "INFRATOR", "CONDUTOR")), None)
 
         if col_fluig is None:
             return pd.DataFrame()
@@ -648,13 +688,12 @@ class PlanilhasEngine:
         out["Placa"]    = df.get(col_placa, "")
         out["Infração"] = df.get(col_inf, "")
         out["Valor"]    = df.get(col_valor, df.get("Valor", ""))
-        # NOVO: campo padronizado para o cenário geral
         out["Condutor"] = df.get(col_nome, "")
 
-        out["VALOR_NUM"] = out["Valor"].map(_num)
-        out["DT_M"]      = out["Data"].map(_to_date)
+        out["VALOR_NUM"] = out["Valor"].map(self._num)
+        out["DT_M"]      = out["Data"].map(self._to_date)
         out["FONTE"]     = self.ALIAS.get(key_cfg, os.path.basename(path))
-        out["PLACA_N"]   = out["Placa"].map(_norm_placa)
+        out["PLACA_N"]   = out["Placa"].map(self._norm_placa)
 
         # marcação de DESCONTADA pela Fase Pastores
         if key_cfg == self.KEY_FASE_PASTORES and len(out):
@@ -670,13 +709,9 @@ class PlanilhasEngine:
 
         return out
 
-    # ---------- Consolidação por FLUIG ----------
+    # ---------- Consolidação por FLUIG (só 3 fontes) ----------
     def load_consolidated(self, filtro_nome: str = "", data_ini=None, data_fim=None):
-        all_keys = [
-            self.KEY_DETALHAMENTO,
-            self.KEY_FASE_PASTORES,
-            self.KEY_COND_IDENT,
-        ]
+        all_keys = [self.KEY_DETALHAMENTO, self.KEY_FASE_PASTORES, self.KEY_COND_IDENT]
 
         frames = []
         presentes = {}  # fonte -> set(FLUIG)
@@ -706,13 +741,13 @@ class PlanilhasEngine:
             consolidated = pd.DataFrame({
                 "FLUIG": grp.apply(lambda g: str(g.name)),
                 "Fontes": grp["FONTE"].apply(agg_fontes),
-                "Status": grp["Status"].apply(_first_nonempty),
+                "Status": grp["Status"].apply(self._first_nonempty),
                 "DT_M": grp["DT_M"].apply(agg_data),
-                "Data": grp["Data"].apply(_first_nonempty),
-                "Placa": grp["Placa"].apply(_most_frequent_placa),
-                "Condutor": grp["Condutor"].apply(_first_nonempty),  # NOVO
-                "Infração": grp["Infração"].apply(_first_nonempty),
-                "Valor": grp["Valor"].apply(_first_nonempty),
+                "Data": grp["Data"].apply(self._first_nonempty),
+                "Placa": grp["Placa"].apply(self._most_frequent_placa),
+                "Condutor": grp["Condutor"].apply(self._first_nonempty),
+                "Infração": grp["Infração"].apply(self._first_nonempty),
+                "Valor": grp["Valor"].apply(self._first_nonempty),
                 "VALOR_NUM": grp["VALOR_NUM"].apply(agg_valornum),
                 "DESCONTADA": grp["DESCONTADA"].apply(lambda s: bool(s.astype(bool).any())),
             }).reset_index(drop=True)
@@ -736,7 +771,7 @@ class PlanilhasEngine:
                         presence.loc[str(fl), src] = "✓"
             presence.index.name = "FLUIG"
 
-        # KPIs (pós-período)
+        # KPIs
         if consolidated.empty:
             kpis = {"descontado": 0.0, "pendente": 0.0, "qtd": 0}
         else:
@@ -744,6 +779,7 @@ class PlanilhasEngine:
             pend = float(consolidated.loc[~consolidated["DESCONTADA"], "VALOR_NUM"].sum() or 0.0)
             kpis = {"descontado": desc, "pendente": pend, "qtd": int(len(consolidated))}
         return consolidated, presence, kpis
+
 
 class InserirDialog(QDialog):
     def __init__(self, parent, prefill_fluig=None):
@@ -820,29 +856,29 @@ class InserirDialog(QDialog):
                 de.setDate(qd)
                 se.setCurrentText("Pago")
 
+
     def on_fluig_leave(self, le: QLineEdit):
+        from gestao_frota_single import cfg_get, cfg_set, PORTUGUESE_MONTHS, DATE_FORMAT
         code = str(le.text()).strip()
         if code and code in self.df["FLUIG"].astype(str).tolist():
             QMessageBox.warning(self, "Erro", "FLUIG já existe"); le.clear(); return
-        # tenta preencher a partir da planilha de Detalhamento
+
         try:
             det = cfg_get(PlanilhasEngine.KEY_DETALHAMENTO)
             if not det or not os.path.exists(det):
-                det, _ = QFileDialog.getOpenFileName(self, "Selecione Detalhamento", "", "Arquivos Excel (*.xlsx *.xls)")
+                det, _ = QFileDialog.getOpenFileName(self, "Selecione Detalhamento", "", "Planilhas (*.xlsx *.xls *.xlsm *.csv)")
                 if det:
                     cfg_set(PlanilhasEngine.KEY_DETALHAMENTO, det)
             if det:
-                x = pd.read_excel(
-                    det,
-                    usecols=["Nº Fluig", "Placa", "Nome", "AIT", "Data Infração", "Data Limite", "Status"],
-                    dtype=str
-                ).fillna("")
+                x = read_table_any(det)
+                x = x.fillna("")
+                x = x.rename(columns={c: c.strip() for c in x.columns})
             else:
                 x = pd.DataFrame()
         except Exception:
             x = pd.DataFrame()
 
-        if x.empty:
+        if x.empty or "Nº Fluig" not in x.columns:
             self._apply_fase_pastores(code)
             return
 
@@ -851,32 +887,36 @@ class InserirDialog(QDialog):
             self._apply_fase_pastores(code)
             return
 
-        if "PLACA" in self.widgets:
+        if "PLACA" in self.widgets and "Placa" in row.columns:
             self.widgets["PLACA"].setText(row["Placa"].iloc[0])
-        if "INFRATOR" in self.widgets:
+        if "INFRATOR" in self.widgets and "Nome" in row.columns:
             self.widgets["INFRATOR"].setText(row["Nome"].iloc[0])
-        if "NOTIFICACAO" in self.widgets:
+        if "NOTIFICACAO" in self.widgets and "AIT" in row.columns:
             self.widgets["NOTIFICACAO"].setText(row["AIT"].iloc[0])
 
         try:
-            dt = pd.to_datetime(row["Data Infração"].iloc[0], dayfirst=False, errors="coerce")
-            if pd.notna(dt):
-                if "MES" in self.widgets:
-                    self.widgets["MES"].setText(PORTUGUESE_MONTHS.get(dt.month, ""))
-                if "ANO" in self.widgets:
-                    self.widgets["ANO"].setText(str(dt.year))
+            if "Data Infração" in row.columns:
+                dt = pd.to_datetime(row["Data Infração"].iloc[0], dayfirst=False, errors="coerce")
+                if pd.notna(dt):
+                    if "MES" in self.widgets:
+                        self.widgets["MES"].setText(PORTUGUESE_MONTHS.get(dt.month, ""))
+                    if "ANO" in self.widgets:
+                        self.widgets["ANO"].setText(str(dt.year))
         except Exception:
             pass
 
         try:
-            d2 = pd.to_datetime(row["Data Limite"].iloc[0], dayfirst=False, errors="coerce")
-            if pd.notna(d2) and "DATA INDICAÇÃO" in self.widgets and isinstance(self.widgets["DATA INDICAÇÃO"], tuple):
-                de, _ = self.widgets["DATA INDICAÇÃO"]
-                de.setDate(QDate(d2.year, d2.month, d2.day))
+            if "Data Limite" in row.columns and "DATA INDICAÇÃO" in self.widgets and isinstance(self.widgets["DATA INDICAÇÃO"], tuple):
+                d2 = pd.to_datetime(row["Data Limite"].iloc[0], dayfirst=False, errors="coerce")
+                if pd.notna(d2):
+                    de, _ = self.widgets["DATA INDICAÇÃO"]
+                    de.setDate(QDate(d2.year, d2.month, d2.day))
         except Exception:
             pass
 
         self._apply_fase_pastores(code)
+
+
 
     def salvar(self):
         new = {}
@@ -1721,20 +1761,23 @@ class InfraMultasWindow(QWidget):
         w.show()
 
     def conferir_fluig(self):
+        from gestao_frota_single import cfg_get, cfg_set
         try:
             detalhamento_path = cfg_get(PlanilhasEngine.KEY_DETALHAMENTO)
             if not detalhamento_path or not os.path.exists(detalhamento_path):
-                detalhamento_path, _ = QFileDialog.getOpenFileName(self, "Selecione Detalhamento", "", "Arquivos Excel (*.xlsx *.xls)")
+                detalhamento_path, _ = QFileDialog.getOpenFileName(self, "Selecione Detalhamento", "", "Planilhas (*.xlsx *.xls *.xlsm *.csv)")
                 if not detalhamento_path:
                     return
                 cfg_set(PlanilhasEngine.KEY_DETALHAMENTO, detalhamento_path)
 
-            df_det = pd.read_excel(detalhamento_path, dtype=str).fillna("")
+            df_det = read_table_any(detalhamento_path).fillna("")
             if df_det.empty or len(df_det.columns) < 2:
                 QMessageBox.warning(self, "Aviso", "Planilha inválida."); return
+
             status_col = next((c for c in df_det.columns if c.strip().lower() == "status"), df_det.columns[1])
             mask_aberta = df_det[status_col].astype(str).str.strip().str.lower().eq("aberta")
             df_open = df_det[mask_aberta].copy()
+
             if "Nº Fluig" in df_open.columns:
                 fcol = "Nº Fluig"
             else:
@@ -1742,6 +1785,8 @@ class InfraMultasWindow(QWidget):
             if not fcol:
                 QMessageBox.warning(self, "Aviso", "Coluna de Fluig não encontrada."); return
 
+            from utils import ensure_status_cols
+            from gestao_frota_single import cfg_get
             df_csv = ensure_status_cols(pd.read_csv(cfg_get("geral_multas_csv"), dtype=str).fillna(""), csv_path=cfg_get("geral_multas_csv"))
             if "COMENTARIO" not in df_csv.columns:
                 df_csv["COMENTARIO"] = ""
@@ -1759,6 +1804,7 @@ class InfraMultasWindow(QWidget):
             right_cols = [c for c in ["FLUIG", "PLACA", "INFRATOR", "NOTIFICACAO", "ANO", "MES", "COMENTARIO"] if c in df_csv.columns]
             df_right = df_csv[df_csv["FLUIG"].astype(str).str.strip().isin(no_det_codes)][right_cols].copy()
 
+            from utils import ConferirFluigDialog
             dlg = ConferirFluigDialog(self, df_left, df_right)
             dlg.exec()
         except Exception as e:
@@ -1786,17 +1832,20 @@ class InfraMultasWindow(QWidget):
         dlg.exec()
         self.reload_geral()
 
+# ...
     def fase_pastores(self):
+        from gestao_frota_single import cfg_get, cfg_set, DATE_FORMAT
+        from utils import ensure_status_cols, _parse_dt_any, read_table_any
         try:
             path = cfg_get(PlanilhasEngine.KEY_FASE_PASTORES)
             if not path or not os.path.exists(path):
-                path, _ = QFileDialog.getOpenFileName(self, "Selecione Fase Pastores", "", "Arquivos Excel (*.xlsx *.xls)")
+                path, _ = QFileDialog.getOpenFileName(self, "Selecione Fase Pastores", "", "Planilhas (*.xlsx *.xls *.xlsm *.csv)")
                 if not path:
                     QMessageBox.warning(self, "Aviso", "Planilha Fase Pastores não selecionada.")
                     return
                 cfg_set(PlanilhasEngine.KEY_FASE_PASTORES, path)
 
-            dfp = pd.read_excel(path, dtype=str).fillna("")
+            dfp = read_table_any(path).fillna("")
             fcol = next((c for c in dfp.columns if "fluig" in c.lower()), None)
             dcol = next((c for c in dfp.columns if "data" in c.lower() and "pastor" in c.lower()), None)
             tcol = next((c for c in dfp.columns if "tipo" in c.lower()), None)
@@ -1813,13 +1862,10 @@ class InfraMultasWindow(QWidget):
                 f = str(r[fcol]).strip()
                 tipo = str(r[tcol]).upper()
                 data = str(r[dcol]).strip()
-                if not f or f not in idx:
-                    continue
-                if "PASTOR" not in tipo or not data:
-                    continue
+                if not f or f not in idx: continue
+                if "PASTOR" not in tipo or not data: continue
                 qd = _parse_dt_any(data)
-                if not qd.isValid():
-                    continue
+                if not qd.isValid(): continue
                 i = idx[f]
                 df.at[i, "SGU"] = qd.toString(DATE_FORMAT)
                 df.at[i, "SGU_STATUS"] = "Pago"
@@ -1832,3 +1878,4 @@ class InfraMultasWindow(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "Erro", str(e))
         self.reload_geral()
+

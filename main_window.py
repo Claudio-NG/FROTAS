@@ -25,6 +25,22 @@ from relatorios import RelatorioWindow
 from combustivel import CombustivelMenu, CombustivelWindow
 
 
+
+from utils import read_table_any  # <--- importar
+
+def _read_table_safely(path):
+    import os
+    import pandas as pd
+    from PyQt6.QtWidgets import QMessageBox
+    if not path or not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        return read_table_any(path)
+    except Exception:
+        QMessageBox.warning(None, "Aviso", f"Erro abrindo {os.path.basename(path)}")
+        return pd.DataFrame()
+
+
 def _collect_alertas(df):
     """
     Monta as linhas (FLUIG, INFRATOR, PLACA, ETAPA, DATA, STATUS)
@@ -44,12 +60,6 @@ def _collect_alertas(df):
             if dt or st:
                 linhas.append([fluig, infr, placa, col, dt, st])
     return linhas
-
-
-
-
-
-
 
 
 class AlertsTab(QWidget):
@@ -456,13 +466,7 @@ def _parse_money(s):
 
 
 class CenarioGeralWindow(QWidget):
-    """
-    Painel consolidado (mini-BI):
-    - Base: Fase Pastores, complementada por Detalhamento e Condutor Identificado
-    - Filtro de tempo por Data de Infração
-    - Filtros por coluna (modelo igual ao das outras telas): texto ao digitar, multiseleção, modo vazio/cheio
-    - Abas: GERAL, FLUIG, DATA, NOME, TIPO, PLACA, REGIÃO/IGREJA
-    """
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Cenário Geral")
@@ -492,9 +496,10 @@ class CenarioGeralWindow(QWidget):
         return df.rename(columns=use)
 
     def _load_data(self):
-        det = self._read_excel_safely(self.det_path)
-        past = self._read_excel_safely(self.past_path)
-        cond = self._read_excel_safely(self.cond_path)
+
+        det = _read_table_safely(self.det_path)
+        past = _read_table_safely(self.past_path)
+        cond = _read_table_safely(self.cond_path)
 
         past = self._norm_cols(past, {
             "Nº Fluig":"FLUIG","UF":"UF","Placa":"PLACA","Bloco":"BLOCO","Região":"REGIAO","Igreja":"IGREJA",

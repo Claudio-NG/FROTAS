@@ -106,9 +106,10 @@ class _ReportTab(QWidget):
                 df = pd.read_excel(caminho, dtype=str).fillna("")
             elif ext == ".csv":
                 try:
-                    df = pd.read_csv(caminho, dtype=str, encoding="utf-8").fillna("")
+                    # tenta UTF-8; fallback Latin-1, separador inferido
+                    df = pd.read_csv(caminho, dtype=str, sep=None, engine="python", encoding="utf-8").fillna("")
                 except UnicodeDecodeError:
-                    df = pd.read_csv(caminho, dtype=str, encoding="latin1").fillna("")
+                    df = pd.read_csv(caminho, dtype=str, sep=None, engine="python", encoding="latin1").fillna("")
             else:
                 QMessageBox.warning(self, "Aviso", "Formato não suportado.")
                 return

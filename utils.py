@@ -67,6 +67,46 @@ STATUS_COLOR = {
     "": QColor("#BDBDBD"),
 }
 
+import os, csv
+import pandas as pd
+
+def read_table_any(path: str) -> pd.DataFrame:
+
+    if not path or not os.path.exists(path):
+        return pd.DataFrame()
+    try:
+        lower = path.lower()
+        if lower.endswith(".csv"):
+            # Detecta encoding
+            with open(path, "rb") as fh:
+                head = fh.read(4096)
+            encoding = None
+            for enc in ("utf-8-sig", "utf-8"):
+                try:
+                    head.decode(enc)
+                    encoding = enc
+                    break
+                except Exception:
+                    pass
+            if not encoding:
+                encoding = "latin1"
+
+            try:
+                sample = head.decode(encoding, errors="ignore")
+                dialect = csv.Sniffer().sniff(sample, delimiters=";,")
+                sep = dialect.delimiter
+            except Exception:
+                txt = sample if "sample" in locals() else ""
+                sep = ";" if (txt.count(";") >= txt.count(",")) else ","
+
+            df = pd.read_csv(path, sep=sep, dtype=str, encoding=encoding).fillna("")
+        else:
+            df = pd.read_excel(path, dtype=str).fillna("")
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+    except Exception:
+        return pd.DataFrame()
+
 
 def _norm(s: str) -> str:
     s = ''.join(ch for ch in unicodedata.normalize('NFKD', str(s or "")) if not unicodedata.combining(ch))
@@ -77,9 +117,6 @@ def _only_digits(s: str) -> str:
     return re.sub(r"\D+", "", str(s or ""))
 
 
-# =============================================================================
-# Filtro global de textos (usado por telas)
-# =============================================================================
 
 def df_apply_global_texts(df: pd.DataFrame, texts: list[str]) -> pd.DataFrame:
     """

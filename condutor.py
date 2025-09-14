@@ -1,110 +1,142 @@
+# condutor.py
 import os, re
 import pandas as pd
-from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from utils import GlobalFilterBar, df_apply_global_texts
+
 from PyQt6.QtCore import Qt, QDate, pyqtSignal, QObject
 from PyQt6.QtGui import QFont, QColor, QStandardItemModel, QStandardItem
 from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton,
-    QCompleter, QDateEdit, QTableWidget, QHeaderView, QTableWidgetItem, QGridLayout,
-    QMessageBox, QComboBox
+    QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QFrame, QLabel, QLineEdit,
+    QComboBox, QPushButton, QDateEdit, QTableWidget, QTableWidgetItem, QHeaderView,
+    QMessageBox, QCompleter
 )
+
+# utilidades já existentes no seu projeto
+from utils import df_apply_global_texts, GlobalFilterBar
 
 DATE_FORMAT = "dd/MM/yyyy"
 
+# ----------------- Helpers locais (autossuficientes) -----------------
+class _Sig(QObject):
+    ready = pyqtSignal(str, pd.DataFrame)
+    error  = pyqtSignal(str)
+
+def _resolve_candidates(base: str) -> list[str]:
+    """Dado um 'base' (com ou sem extensão), retorna caminhos candidatos existentes, priorizando CSV."""
+    if not base: return []
+    if os.path.exists(base):  # caminho já completo
+        return [base]
+    folder = os.path.dirname(base) or "."
+    stem   = os.path.basename(base)
+    pats = [
+        f"{stem}.csv", f"{stem}.CSV",
+        f"{stem}.xlsx", f"{stem}.xls",
+        f"{stem}*.csv", f"{stem}*.CSV",
+        f"{stem}*.xlsx", f"{stem}*.xls",
+    ]
+    out = []
+    try:
+        items = os.listdir(folder)
+    except Exception:
+        items = []
+    for p in pats:
+        rx = re.compile("^" + re.escape(p).replace("\\*", ".*") + "$", flags=re.IGNORECASE)
+        for x in items:
+            if rx.fullmatch(x):
+                cand = os.path.join(folder, x)
+                if os.path.isfile(cand):
+                    out.append(cand)
+    out.sort(key=lambda p: (0 if p.lower().endswith(".csv") else 1, p))
+    return list(dict.fromkeys(out))
+
+def _resolve_path(base: str) -> str:
+    cands = _resolve_candidates(base)
+    return cands[0] if cands else ""
+
+def _read_table_flex(base: str) -> pd.DataFrame:
+    """
+    Lê CSV (UTF-8 com fallback Latin-1) ou Excel. 'base' pode vir sem extensão.
+    Sempre retorna dtype=str e sem NaN.
+    """
+    path = _resolve_path(base)
+    if not path:
+        return pd.DataFrame()
+    ext = os.path.splitext(path)[1].lower()
+    try:
+        if ext == ".csv":
+            try:
+                df = pd.read_csv(path, dtype=str, sep=None, engine="python", encoding="utf-8")
+            except UnicodeDecodeError:
+                df = pd.read_csv(path, dtype=str, sep=None, engine="python", encoding="latin1")
+        elif ext in (".xlsx", ".xls"):
+            df = pd.read_excel(path, dtype=str)
+        else:
+            return pd.DataFrame()
+        return df.fillna("")
+    except Exception:
+        return pd.DataFrame()
+
+def _to_date(val):
+    s = str(val).strip()
+    if not s: return pd.NaT
+    for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return pd.to_datetime(s, format=fmt, dayfirst=True, errors="raise")
+        except Exception:
+            pass
+    return pd.to_datetime(s, dayfirst=True, errors="coerce")
 
 def _num(s):
-    s = str(s or "").strip()
-    if not s:
-        return 0.0
-    # remove tudo exceto dígitos, vírgula, ponto e hífen
-    s = re.sub(r"[^\d,.-]", "", s)
-    # converte para ponto decimal padrão
-    if "," in s and "." in s:
-        s = s.replace(".", "").replace(",", ".")
+    """Converte string (pt-BR/US) p/ float. Ex.: 'R$ 1.234,56' -> 1234.56"""
+    if s is None: return 0.0
+    txt = re.sub(r"[^\d,.\-]", "", str(s)).strip()
+    if not txt: return 0.0
+    if "," in txt and "." in txt:
+        if txt.rfind(",") > txt.rfind("."):
+            txt = txt.replace(".", "").replace(",", ".")
+        else:
+            txt = txt.replace(",", "")
     else:
-        s = s.replace(",", ".")
+        txt = txt.replace(",", ".")
     try:
-        return float(s)
+        return float(txt)
     except Exception:
         return 0.0
 
-
-def _to_date(s):
-    s = str(s or "").strip()
-    if not s:
-        return pd.NaT
-    # tenta ISO completo / data simples
-    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
-        try:
-            return pd.to_datetime(s, format=fmt, errors="raise")
-        except Exception:
-            pass
-    # fallback: dayfirst
-    return pd.to_datetime(s, dayfirst=True, errors="coerce")
-
-
-def _norm_placa(x: str) -> str:
-    return re.sub(r"[^A-Z0-9]", "", str(x or "").upper())
-
+def _norm_placa(s: str) -> str:
+    return re.sub(r"[^A-Z0-9]", "", str(s or "").upper())
 
 def _guess_points(valor: float) -> int:
-    """Estimativa simples por faixas usuais de valores (aproximação)."""
-    v = float(valor or 0)
-    v = round(v, 2)
-    # Exemplos atuais comuns:
-    if abs(v - 88.38) <= 0.5:
-        return 3   # leve
-    if abs(v - 130.16) <= 0.8:
-        return 4   # média
-    if abs(v - 195.23) <= 1.0:
-        return 5   # grave
-    if abs(v - 293.47) <= 1.5:
-        return 7   # gravíssima
-    # fallback por faixa
-    if v <= 100:
-        return 3
-    if v <= 160:
-        return 4
-    if v <= 230:
-        return 5
+    x = float(valor or 0)
+    if x <= 150: return 3
+    if x <= 260: return 4
+    if x <= 430: return 5
     return 7
 
-
-def _first_nonempty(series: pd.Series) -> str:
-    for x in series:
-        s = str(x or "").strip()
-        if s:
-            return s
+def _first_nonempty(s: pd.Series) -> str:
+    for v in s:
+        if str(v).strip():
+            return str(v)
     return ""
 
-
-def _most_frequent_placa(series: pd.Series) -> str:
-    """Escolhe a forma mais comum da placa considerando equivalentes por normalização.
-    Prefere forma com hífen se houver empate."""
-    vals = series.fillna("").astype(str).tolist()
-    if not vals:
+def _most_frequent_placa(s: pd.Series) -> str:
+    if s is None or len(s) == 0:
         return ""
-    norm_map = {}
-    for v in vals:
-        n = _norm_placa(v)
-        norm_map.setdefault(n, []).append(v.strip())
-    if not norm_map:
-        return ""
-    key = max(norm_map.keys(), key=lambda k: len(norm_map[k]))
-    formas = norm_map[key]
-    with_hyphen = [f for f in formas if "-" in f]
-    return with_hyphen[0] if with_hyphen else formas[0]
+    n = s.astype(str).map(_norm_placa)
+    if n.empty: return ""
+    key = n.value_counts().idxmax()
+    for v in s:
+        if _norm_placa(v) == key:
+            return str(v)
+    return str(s.iloc[0])
 
+def _series(df: pd.DataFrame, col: str, fill: str = "") -> pd.Series:
+    """Garante uma Series (nunca string) para operações .map/.astype quando a coluna pode não existir."""
+    if col in df.columns:
+        return df[col]
+    return pd.Series([fill]*len(df), index=df.index, dtype=object)
 
-# =========================== Sinais ===========================
-class _Sig(QObject):
-    ready = pyqtSignal(str, pd.DataFrame)
-    error = pyqtSignal(str)
-
-
-# =========================== Janela ===========================
+# ----------------- Classe principal (CSV-first) -----------------
 class CondutorWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -114,40 +146,30 @@ class CondutorWindow(QWidget):
         self.sig.ready.connect(self._on_chunk_ready)
         self.sig.error.connect(self._on_error)
 
-        self.p_extrato = "ExtratoGeral.xlsx"              # ajuste se necessário
-        self.p_simpl = "ExtratoSimplificado.xlsx"
-        self.p_resp = "Responsavel.xlsx"
-
+        # caminhos "base" (com ou sem extensão)
+        self.p_extrato = "ExtratoGeral"
+        self.p_simpl   = "ExtratoSimplificado"
+        self.p_resp    = "Responsavel"
         self.p_multas_sources = [
-            "Notificações de Multas - Detalhamento.xlsx",
-            "Notificações de Multas - Fase Pastores.xlsx",
-            "Notificações de Multas - Condutor Identificado.xlsx",
+            "Notificações de Multas - Detalhamento",
+            "Notificações de Multas - Fase Pastores",
+            "Notificações de Multas - Condutor Identificado",
         ]
 
-        self._df_m = pd.DataFrame()   # multas (CONSOLIDADAS por FLUIG)
-        self._df_e = pd.DataFrame()   # extrato geral
-        self._df_dados = {}           # "Dados atuais do condutor"
+        self._df_m = pd.DataFrame()      # multas consolidadas
+        self._df_e = pd.DataFrame()      # extrato geral
         self._presence = pd.DataFrame()  # matriz presença FLUIG x fonte
-        self._kpis_multas = {
-            "descontado": 0.0,
-            "pendente": 0.0,
-            "pontos_periodo": 0,
-            "pontos_12m": 0,
-        }
-
-        # cache por nome
-        self._cache = {}  # nome -> {"M": df_m, "E": df_e, "DADOS": dict, "PRESENCE": df, "KPIS": dict}
+        self._kpis_multas = {"descontado": 0.0, "pendente": 0.0, "pontos_periodo": 0, "pontos_12m": 0}
+        self._cache = {}  # nome -> pack
 
         self.names_model = QStandardItemModel(self)
         self._build_ui()
         self._build_completer_source()
 
-        self.setStyleSheet(
-            """
+        self.setStyleSheet("""
             QFrame#glass { background: rgba(255,255,255,0.5); border-radius: 14px; }
             QFrame#card  { background: #ffffff; border-radius: 14px; }
-            """
-        )
+        """)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -170,7 +192,6 @@ class CondutorWindow(QWidget):
 
         self.btn_carregar = QPushButton("Carregar (Nome 1)")
         self.btn_carregar.setMinimumHeight(36)
-
         self.btn_exec = QPushButton("Executar (Combinar/Comparar)")
         self.btn_exec.setMinimumHeight(36)
 
@@ -204,7 +225,6 @@ class CondutorWindow(QWidget):
         cards = QFrame(); cards.setObjectName("glass"); self._apply_shadow(cards, radius=16, blur=50)
         cg = QGridLayout(cards)
 
-        # KPIs (multas/combustível)
         self.k_multas = QLabel("0"); self.k_valor = QLabel("0,00")
         self.k_abast = QLabel("0"); self.k_litros = QLabel("0,00"); self.k_custo = QLabel("0,00")
         self.k_desc = QLabel("0,00"); self.k_pend = QLabel("0,00")
@@ -234,16 +254,12 @@ class CondutorWindow(QWidget):
         self.l_placa = QLabel("-"); self.l_modelo = QLabel("-"); self.l_fab = QLabel("-"); self.l_cidade = QLabel("-")
         self.l_lim_atual = QLabel("-"); self.l_compras = QLabel("-"); self.l_saldo = QLabel("-"); self.l_lim_next = QLabel("-")
 
-        # linha 1
         dv.addWidget(QLabel("Placa Atual:"), 1, 0); dv.addWidget(self.l_placa, 1, 1)
         dv.addWidget(QLabel("Modelo:"), 1, 2);     dv.addWidget(self.l_modelo, 1, 3)
-        # linha 2
         dv.addWidget(QLabel("Fabricante:"), 2, 0); dv.addWidget(self.l_fab, 2, 1)
         dv.addWidget(QLabel("Cidade/UF:"), 2, 2);  dv.addWidget(self.l_cidade, 2, 3)
-        # linha 3
         dv.addWidget(QLabel("Limite Atual (R$):"), 3, 0); dv.addWidget(self.l_lim_atual, 3, 1)
         dv.addWidget(QLabel("Compras (R$):"), 3, 2);      dv.addWidget(self.l_compras, 3, 3)
-        # linha 4
         dv.addWidget(QLabel("Saldo (R$):"), 4, 0);        dv.addWidget(self.l_saldo, 4, 1)
         dv.addWidget(QLabel("Limite Próx. Período (R$):"), 4, 2); dv.addWidget(self.l_lim_next, 4, 3)
 
@@ -251,7 +267,6 @@ class CondutorWindow(QWidget):
         root.addWidget(cards)
 
         # Tabelas
-        # >>> Multas agora exibem UMA LINHA POR FLUIG e coluna "Fontes"
         self.tbl_m = self._mk_table(["FLUIG", "Fontes", "Status", "Data", "Placa", "Infração", "Valor (R$)", "Descontada?"])
         self.tbl_e = self._mk_table(["Data", "Placa", "Motorista", "Combustível", "Litros", "R$/L", "R$", "Estabelecimento", "Cidade/UF"])
         wrap = QHBoxLayout()
@@ -259,16 +274,13 @@ class CondutorWindow(QWidget):
         wrap.addWidget(self.tbl_e, 1)
         root.addLayout(wrap)
 
-        # ações
         self.btn_carregar.clicked.connect(self._load_one_and_show)
         self.btn_exec.clicked.connect(self._execute_mode)
 
     def _apply_shadow(self, w, radius=18, blur=60, color=QColor(0, 0, 0, 70)):
         from PyQt6.QtWidgets import QGraphicsDropShadowEffect
         eff = QGraphicsDropShadowEffect()
-        eff.setOffset(0, 6)
-        eff.setBlurRadius(blur)
-        eff.setColor(color)
+        eff.setOffset(0, 6); eff.setBlurRadius(blur); eff.setColor(color)
         w.setGraphicsEffect(eff)
 
     def _mk_table(self, headers):
@@ -276,53 +288,47 @@ class CondutorWindow(QWidget):
         t.setAlternatingRowColors(True)
         t.setSortingEnabled(True)
         t.horizontalHeader().setSortIndicatorShown(True)
-        t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        t.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        # fallback PyQt5/PyQt6
+        try:
+            t.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        except AttributeError:
+            t.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
+        try:
+            t.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
+        except AttributeError:
+            t.verticalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         t.setColumnCount(len(headers))
         t.setHorizontalHeaderLabels(headers)
         return t
 
-    # ---------------- Autocomplete ----------------
     def _build_completer_source(self):
         names = set()
-        # Responsavel (NOME)
-        if os.path.exists(self.p_resp):
-            try:
-                dr = pd.read_excel(self.p_resp, dtype=str).fillna("")
-                if "NOME" in dr.columns:
-                    names |= set([x for x in dr["NOME"].astype(str) if x.strip()])
-            except Exception:
-                pass
-        # Extrato Geral (Motorista / Responsável)
-        if os.path.exists(self.p_extrato):
-            try:
-                de = pd.read_excel(self.p_extrato, dtype=str).fillna("")
-                for cand in ("NOME MOTORISTA", "Motorista", "MOTORISTA", "Responsável", "RESPONSÁVEL", "RESPONSAVEL", "Nome Responsável"):
-                    if cand in de.columns:
-                        names |= set([x for x in de[cand].astype(str) if x.strip()])
-            except Exception:
-                pass
-        # Extrato Simplificado (Nome Responsável)
-        if os.path.exists(self.p_simpl):
-            try:
-                ds = pd.read_excel(self.p_simpl, dtype=str).fillna("")
-                for cand in ("Nome Responsável", "RESPONSÁVEL", "RESPONSAVEL", "Responsável", "Responsavel"):
-                    if cand in ds.columns:
-                        names |= set([x for x in ds[cand].astype(str) if x.strip()])
-                        break
-            except Exception:
-                pass
-        # Multas (várias fontes — coluna Nome)
-        for p in self.p_multas_sources:
-            if os.path.exists(p):
-                try:
-                    dm = pd.read_excel(p, dtype=str).fillna("")
-                    for cand in ("Nome", "NOME"):
-                        if cand in dm.columns:
-                            names |= set([x for x in dm[cand].astype(str) if x.strip()])
-                            break
-                except Exception:
-                    pass
+
+        # Responsável
+        df_r = _read_table_flex(self.p_resp)
+        if not df_r.empty and "NOME" in df_r.columns:
+            names |= {x for x in df_r["NOME"].astype(str) if x.strip()}
+
+        # Extratos
+        df_e = _read_table_flex(self.p_extrato)
+        if not df_e.empty:
+            for cand in ("NOME MOTORISTA", "Motorista", "MOTORISTA", "Responsável", "RESPONSÁVEL", "RESPONSAVEL", "Nome Responsável"):
+                if cand in df_e.columns:
+                    names |= {x for x in df_e[cand].astype(str) if x.strip()}
+        df_s = _read_table_flex(self.p_simpl)
+        if not df_s.empty:
+            for cand in ("Nome Responsável", "RESPONSÁVEL", "RESPONSAVEL", "Responsável", "Responsavel"):
+                if cand in df_s.columns:
+                    names |= {x for x in df_s[cand].astype(str) if x.strip()}
+
+        # Multas
+        for base in self.p_multas_sources:
+            df_m = _read_table_flex(base)
+            if df_m.empty: continue
+            for cand in ("Nome", "NOME"):
+                if cand in df_m.columns:
+                    names |= {x for x in df_m[cand].astype(str) if x.strip()}
+                    break
 
         self.names_model.clear()
         for n in sorted(names):
@@ -353,29 +359,23 @@ class CondutorWindow(QWidget):
             self._load_one_and_show(); return
 
         packs = self._load_for_many([name1, name2])
-        if mode == "Combinar":
-            self._set_active_combined(packs)
-            self._apply_filters()
-        else:  # Comparar
-            self._set_active_combined(packs)
-            self._apply_filters()
+        self._set_active_combined(packs)
+        self._apply_filters()
+        if mode == "Comparar":
             self._show_compare_summary(packs)
 
     # ---------------- Carregador por nome ----------------
     def _load_for_many(self, names: list[str]) -> dict:
         names = [n for n in names if n.strip()]
-        out = {}
-        todo = []
+        out, todo = {}, []
         for n in names:
-            if n in self._cache:
-                out[n] = self._cache[n]
-            else:
-                todo.append(n)
+            if n in self._cache: out[n] = self._cache[n]
+            else: todo.append(n)
 
         def _load_all_for(n):
             m, presence, kpis = self._load_multas_for(n)
             e = self._load_extrato_for(n)
-            dados = self._load_dados_atuais(n)  # Responsavel + ExtratoSimplificado
+            dados = self._load_dados_atuais(n)
             return n, {"M": m, "E": e, "DADOS": dados, "PRESENCE": presence, "KPIS": kpis}
 
         if todo:
@@ -388,7 +388,6 @@ class CondutorWindow(QWidget):
                         out[nm] = pack
                     except Exception as e:
                         self.sig.error.emit(str(e))
-
         return out
 
     def _set_active_from_single(self, name, packs):
@@ -400,21 +399,15 @@ class CondutorWindow(QWidget):
         self._fill_dados_atuais(pack.get("DADOS", {}))
 
     def _set_active_combined(self, packs):
-        ms = []; es = []
+        ms, es = [], []
         k_desc = k_pend = pts_periodo = pts_12m = 0.0
-        for nm, pack in packs.items():
-            m = pack.get("M", pd.DataFrame())
-            e = pack.get("E", pd.DataFrame())
-            if not m.empty:
-                ms.append(m.copy())
-            if not e.empty:
-                es.append(e.copy())
+        for _nm, pack in packs.items():
+            m = pack.get("M", pd.DataFrame()); e = pack.get("E", pd.DataFrame())
+            if not m.empty: ms.append(m.copy())
+            if not e.empty: es.append(e.copy())
             k = pack.get("KPIS", {})
-            k_desc += float(k.get("descontado", 0))
-            k_pend += float(k.get("pendente", 0))
-            pts_periodo += float(k.get("pontos_periodo", 0))
-            pts_12m += float(k.get("pontos_12m", 0))
-
+            k_desc += float(k.get("descontado", 0)); k_pend += float(k.get("pendente", 0))
+            pts_periodo += float(k.get("pontos_periodo", 0)); pts_12m += float(k.get("pontos_12m", 0))
         self._df_m = pd.concat(ms, ignore_index=True) if ms else pd.DataFrame()
         self._df_e = pd.concat(es, ignore_index=True) if es else pd.DataFrame()
         self._presence = pd.DataFrame()
@@ -425,85 +418,71 @@ class CondutorWindow(QWidget):
     def _load_dados_atuais(self, name: str) -> dict:
         """
         Usa planilhas:
-          - Responsavel.xlsx (para descobrir PLACA atual do pastor)
-          - ExtratoSimplificado.xlsx (para limites/compras/saldo baseados na placa e/ou no nome)
+          - Responsavel (para descobrir PLACA atual)
+          - ExtratoSimplificado (para limites/compras/saldo)
+        Ambas aceitam .csv/.xlsx/.xls.
         """
         placa_atual = modelo = fabricante = cidade_uf = ""
         lim_atual = compras = saldo = lim_next = ""
 
-        # 1) Responsavel.xlsx -> placa/modelo/fabricante/status
-        if os.path.exists(self.p_resp):
-            try:
-                dr = pd.read_excel(self.p_resp, dtype=str).fillna("")
-                # Filtra por nome (coluna "NOME")
-                if "NOME" in dr.columns:
-                    q = dr[dr["NOME"].astype(str).str.contains(re.escape(name), case=False, na=False)].copy()
-                else:
-                    q = dr.copy()
-                # Preferir registro “ativo”: STATUS != VENDIDO e DATA FIM vazia; senão, o mais recente por DATA INÍCIO
-                if not q.empty:
-                    q["DT_INI"] = _to_date(q.get("DATA INÍCIO", ""))
-                    q["DT_FIM"] = _to_date(q.get("DATA FIM", ""))
-                    act = q[(q.get("STATUS", "").str.upper() != "VENDIDO") & (q["DT_FIM"].isna())]
-                    cand = act if not act.empty else q
-                    cand = cand.sort_values(["DT_INI"], ascending=[False])
-                    r = cand.iloc[0]
-                    placa_atual = str(r.get("PLACA", ""))
-                    modelo = str(r.get("MODELO", ""))
-                    fabricante = str(r.get("MARCA", ""))
-                    cidade_uf = str(r.get("UF", "")).strip()
-            except Exception:
-                pass
+        # 1) Responsavel
+        dr = _read_table_flex(self.p_resp)
+        if not dr.empty:
+            if "NOME" in dr.columns:
+                q = dr[dr["NOME"].astype(str).str.contains(re.escape(name), case=False, na=False)].copy()
+            else:
+                q = dr.copy()
+            if not q.empty:
+                q["DT_INI"] = _series(q, "DATA INÍCIO").map(_to_date)
+                q["DT_FIM"] = _series(q, "DATA FIM").map(_to_date)
+                status = _series(q, "STATUS").astype(str).str.upper()
+                act = q[(status != "VENDIDO") & (q["DT_FIM"].isna())]
+                cand = act if not act.empty else q
+                cand = cand.sort_values(["DT_INI"], ascending=[False])
+                r = cand.iloc[0]
+                placa_atual = str(r.get("PLACA", ""))
+                modelo = str(r.get("MODELO", ""))
+                fabricante = str(r.get("MARCA", ""))
+                cidade_uf = str(r.get("UF", "")).strip()
 
-        # 2) ExtratoSimplificado.xlsx -> limites/saldo por placa/nome
-        if os.path.exists(self.p_simpl):
-            try:
-                ds = pd.read_excel(self.p_simpl, dtype=str).fillna("")
-                # normaliza nomes de colunas possíveis
-                m = {
-                    "Placa": "Placa",
-                    "Família": "Familia",
-                    "Tipo Frota": "Tipo Frota",
-                    "Modelo": "Modelo",
-                    "Fabricante": "Fabricante",
-                    "Cidade/UF": "Cidade/UF",
-                    "Nome Responsável": "Nome Responsável",
-                    "Limite": "Limite",
-                    "Valor Reservado": "Valor Reservado",
-                    "Limite Atual": "Limite Atual",
-                    "Compras (utilizado)": "Compras",
-                    "Saldo": "Saldo",
-                    "Limite Próximo Período": "Limite Próximo",
-                }
-                ren = {k: v for k, v in m.items() if k in ds.columns}
-                ds = ds.rename(columns=ren)
+        # 2) ExtratoSimplificado
+        ds = _read_table_flex(self.p_simpl)
+        if not ds.empty:
+            ren = {
+                "Placa": "Placa",
+                "Família": "Familia",
+                "Tipo Frota": "Tipo Frota",
+                "Modelo": "Modelo",
+                "Fabricante": "Fabricante",
+                "Cidade/UF": "Cidade/UF",
+                "Nome Responsável": "Nome Responsável",
+                "Limite": "Limite",
+                "Valor Reservado": "Valor Reservado",
+                "Limite Atual": "Limite Atual",
+                "Compras (utilizado)": "Compras",
+                "Saldo": "Saldo",
+                "Limite Próximo Período": "Limite Próximo",
+            }
+            ds = ds.rename(columns={k:v for k,v in ren.items() if k in ds.columns})
 
-                # tenta casar pela placa (com/sem hífen) e, na falta, pelo nome responsável
-                hit = pd.DataFrame()
-                if placa_atual:
-                    pnorm = _norm_placa(placa_atual)
-                    ds["_PL"] = ds.get("Placa", "").map(_norm_placa)
-                    hit = ds[ds["_PL"] == pnorm]
-                if hit.empty:
-                    for c in ("Nome Responsável",):
-                        if c in ds.columns:
-                            hit = ds[ds[c].astype(str).str.contains(re.escape(name), case=False, na=False)]
-                            if not hit.empty:
-                                break
-                if not hit.empty:
-                    r = hit.iloc[0]
-                    if not modelo:
-                        modelo = str(r.get("Modelo", ""))
-                    if not fabricante:
-                        fabricante = str(r.get("Fabricante", ""))
-                    if str(r.get("Cidade/UF", "")).strip():
-                        cidade_uf = str(r.get("Cidade/UF", ""))
-                    lim_atual = str(r.get("Limite Atual", ""))
-                    compras = str(r.get("Compras", ""))
-                    saldo = str(r.get("Saldo", ""))
-                    lim_next = str(r.get("Limite Próximo", ""))
-            except Exception:
-                pass
+            hit = pd.DataFrame()
+            if placa_atual:
+                pnorm = _norm_placa(placa_atual)
+                ds["_PL"] = _series(ds, "Placa").map(_norm_placa)
+                hit = ds[ds["_PL"] == pnorm]
+            if hit.empty:
+                if "Nome Responsável" in ds.columns:
+                    hit = ds[ds["Nome Responsável"].astype(str).str.contains(re.escape(name), case=False, na=False)]
+            if not hit.empty:
+                r = hit.iloc[0]
+                modelo      = modelo or str(r.get("Modelo", ""))
+                fabricante  = fabricante or str(r.get("Fabricante", ""))
+                if str(r.get("Cidade/UF", "")).strip():
+                    cidade_uf = str(r.get("Cidade/UF", ""))
+                lim_atual = str(r.get("Limite Atual", ""))
+                compras   = str(r.get("Compras", ""))
+                saldo     = str(r.get("Saldo", ""))
+                lim_next  = str(r.get("Limite Próximo", ""))
 
         return {
             "placa": placa_atual or "-",
@@ -528,20 +507,16 @@ class CondutorWindow(QWidget):
 
     # ---------------- Leitura: Combustível (Extrato Geral) ----------------
     def _load_extrato_for(self, name: str) -> pd.DataFrame:
-        if not os.path.exists(self.p_extrato):
-            return pd.DataFrame()
-        try:
-            df = pd.read_excel(self.p_extrato, dtype=str).fillna("")
-        except Exception:
+        df = _read_table_flex(self.p_extrato)
+        if df.empty:
             return pd.DataFrame()
 
-        # filtra por nome (em Motorista; se não, em Responsável)
+        # filtra por nome
         hit = False
         for c in ("NOME MOTORISTA", "Motorista", "MOTORISTA"):
             if c in df.columns:
                 df = df[df[c].astype(str).str.contains(re.escape(name), case=False, na=False)]
-                hit = True
-                break
+                hit = True; break
         if not hit:
             for c in ("RESPONSAVEL", "Responsável", "RESPONSÁVEL", "Nome Responsável"):
                 if c in df.columns:
@@ -562,87 +537,75 @@ class CondutorWindow(QWidget):
             "UF": "UF",
             "CIDADE/UF": "CIDADE_UF",
         }
-        use = {k: v for k, v in m.items() if k in df.columns}
-        df = df.rename(columns=use)
+        df = df.rename(columns={k:v for k,v in m.items() if k in df.columns})
 
         if "CIDADE_UF" not in df.columns:
-            df["CIDADE_UF"] = df.get("CIDADE", "").astype(str).str.strip() + "/" + df.get("UF", "").astype(str).str.strip()
+            df["CIDADE_UF"] = _series(df, "CIDADE").astype(str).str.strip() + "/" + _series(df, "UF").astype(str).str.strip()
 
-        df["DT_C"] = df.get("DATA_TRANSACAO", "").map(_to_date)
-        for c_src, c_num in [("LITROS", "LITROS_NUM"), ("VL_LITRO", "VL_LITRO_NUM"), ("VALOR", "VALOR_NUM")]:
-            df[c_num] = df.get(c_src, "").map(_num)
+        df["DT_C"] = _series(df, "DATA_TRANSACAO").map(_to_date)
+        for c_src, c_num in [("LITROS","LITROS_NUM"), ("VL_LITRO","VL_LITRO_NUM"), ("VALOR","VALOR_NUM")]:
+            df[c_num] = _series(df, c_src).map(_num)
 
         return df
 
     # ---------------- Leitura: Multas (todas as planilhas) ----------------
     def _load_multas_for(self, name: str):
-        """
-        Consolida todas as fontes de multas, ignora CANCELADA,
-        marca 'DESCONTADA' pela Fase Pastores (Tipo = MULTAS PASTORES e Data Pastores preenchida),
-        e entrega **UMA LINHA POR FLUIG** coalescendo dados entre fontes.
-        Também constrói a matriz de presença FLUIG x fonte e KPIs brutos.
-        """
         frames = []
-        presentes = {}  # fonte -> set(FLUIG)
+        presentes = {}
         fonte_alias = {
             "Notificações de Multas - Detalhamento.xlsx": "Detalhamento",
-            "Notificações de Multas - Detalhamento-2.xlsx": "Detalhamento-2",
-            "Notificações de Multas - Detalhamento (1).xlsx": "Detalhamento(1)",
+            "Notificações de Multas - Detalhamento.csv": "Detalhamento",
             "Notificações de Multas - Fase Pastores.xlsx": "Fase Pastores",
+            "Notificações de Multas - Fase Pastores.csv": "Fase Pastores",
             "Notificações de Multas - Condutor Identificado.xlsx": "Condutor Identificado",
+            "Notificações de Multas - Condutor Identificado.csv": "Condutor Identificado",
         }
 
-        for path in self.p_multas_sources:
-            if not os.path.exists(path):
-                continue
-            try:
-                df = pd.read_excel(path, dtype=str).fillna("")
-            except Exception:
-                continue
+        for base in self.p_multas_sources:
+            path = _resolve_path(base)
+            if not path: continue
+            df = _read_table_flex(path)
+            if df.empty: continue
 
             # filtro por Nome (quando existir a coluna)
-            col_nome = None
-            for c in ("Nome", "NOME"):
-                if c in df.columns:
-                    col_nome = c; break
+            col_nome = next((c for c in ("Nome","NOME") if c in df.columns), None)
             if col_nome:
                 df = df[df[col_nome].astype(str).str.contains(re.escape(name), case=False, na=False)]
 
-            # ignora CANCELADA (se tiver col Status)
-            col_status = next((c for c in df.columns if c.strip().lower() == "status"), None)
+            # ignora CANCELADA
+            col_status = next((c for c in df.columns if c.strip().lower()=="status"), None)
             if col_status:
-                df = df[df[col_status].str.upper() != "CANCELADA"]
+                df = df[_series(df, col_status).astype(str).str.upper() != "CANCELADA"]
 
-            # normaliza colunas necessárias
+            # colunas principais
             col_fluig = next((c for c in df.columns if "FLUIG" in c.upper()), None)
-            col_data = next((c for c in df.columns if "DATA INFRA" in c.upper()), None)
+            col_data  = next((c for c in df.columns if "DATA INFRA" in c.upper()), None)
             col_valor = next((c for c in df.columns if "VALOR TOTAL" in c.upper()), None)
-            col_inf = next((c for c in df.columns if c.upper() in ("INFRAÇÃO", "INFRACAO")), None)
-            col_placa = next((c for c in df.columns if c.strip().upper() == "PLACA"), None)
+            col_inf   = next((c for c in df.columns if c.upper() in ("INFRAÇÃO","INFRACAO")), None)
+            col_placa = next((c for c in df.columns if c.strip().upper()=="PLACA"), None)
 
             tmp = pd.DataFrame()
-            tmp["FLUIG"] = df[col_fluig] if col_fluig else ""
-            tmp["Status"] = df.get(col_status, "")
-            tmp["Data"] = df.get(col_data, "")
-            tmp["Placa"] = df.get(col_placa, "")
-            tmp["Infração"] = df.get(col_inf, "")
-            tmp["Valor"] = df.get(col_valor, df.get("Valor", ""))
+            tmp["FLUIG"]    = _series(df, col_fluig) if col_fluig else ""
+            tmp["Status"]   = _series(df, col_status) if col_status else ""
+            tmp["Data"]     = _series(df, col_data) if col_data else ""
+            tmp["Placa"]    = _series(df, col_placa) if col_placa else ""
+            tmp["Infração"] = _series(df, col_inf) if col_inf else ""
+            tmp["Valor"]    = _series(df, col_valor) if col_valor else _series(df, "Valor")
 
-            if tmp.empty:
-                continue  # nada desta fonte após filtros
+            if tmp.empty: continue
 
             tmp["VALOR_NUM"] = tmp["Valor"].map(_num)
-            tmp["DT_M"] = tmp["Data"].map(_to_date)
-            tmp["FONTE"] = fonte_alias.get(path, os.path.basename(path))
-            tmp["PLACA_N"] = tmp["Placa"].map(_norm_placa)
+            tmp["DT_M"]      = tmp["Data"].map(_to_date)
+            tmp["FONTE"]     = fonte_alias.get(os.path.basename(path), os.path.basename(path))
+            tmp["PLACA_N"]   = tmp["Placa"].map(_norm_placa)
 
-            # Fase Pastores: detectar “descontada”
+            # Fase Pastores => “descontada”
             if "Fase Pastores" in tmp["FONTE"].iloc[0]:
-                col_tipo = next((c for c in df.columns if c.strip().upper() == "TIPO"), None)
-                col_data_past = next((c for c in df.columns if c.strip().upper() == "DATA PASTORES"), None)
-                tipo = df.get(col_tipo, "")
-                data_p = df.get(col_data_past, "")
-                disc = (tipo.astype(str).str.upper() == "MULTAS PASTORES") & (data_p.astype(str).str.strip() != "")
+                col_tipo = next((c for c in df.columns if c.strip().upper()=="TIPO"), None)
+                col_data_past = next((c for c in df.columns if "PASTORES" in c.strip().upper() and "DATA" in c.strip().upper()), None)
+                tipo  = _series(df, col_tipo).astype(str).str.upper()
+                data_p = _series(df, col_data_past).astype(str).str.strip()
+                disc = (tipo == "MULTAS PASTORES") & (data_p != "")
                 tmp["DESCONTADA"] = disc.astype(bool)
             else:
                 tmp["DESCONTADA"] = False
@@ -650,41 +613,35 @@ class CondutorWindow(QWidget):
             frames.append(tmp)
             presentes[tmp["FONTE"].iloc[0]] = set(tmp["FLUIG"].astype(str).unique())
 
-        # Junta tudo
         base = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(
-            columns=["FONTE", "FLUIG", "Status", "Data", "Placa", "Infração", "Valor", "VALOR_NUM", "DT_M", "DESCONTADA", "PLACA_N"]
+            columns=["FONTE","FLUIG","Status","Data","Placa","Infração","Valor","VALOR_NUM","DT_M","DESCONTADA","PLACA_N"]
         )
 
-        # ---- CONSOLIDAÇÃO POR FLUIG (1 linha por multa) ----
+        # Consolidação por FLUIG
         if base.empty:
             consolidated = base.copy()
         else:
-            def agg_fontes(s):
-                return ", ".join(sorted(set([x for x in s if str(x).strip()])))
-
-            def agg_valornum(s):
-                vals = [float(x) for x in s if pd.notna(x)]
-                return max(vals) if vals else 0.0
-
+            def agg_fontes(s):    return ", ".join(sorted({str(x).strip() for x in s if str(x).strip()}))
+            def agg_valornum(s):  return (max([float(x) for x in s if pd.notna(x)]) if any(pd.notna(s)) else 0.0)
             def agg_data(s):
                 ss = [x for x in s if pd.notna(x)]
                 return min(ss) if ss else pd.NaT
 
             grp = base.groupby(base["FLUIG"].astype(str), dropna=False)
             consolidated = pd.DataFrame({
-                "FLUIG": grp.apply(lambda g: str(g.name)),
-                "Fontes": grp["FONTE"].apply(agg_fontes),
-                "Status": grp["Status"].apply(_first_nonempty),
-                "DT_M": grp["DT_M"].apply(agg_data),
-                "Data": grp["Data"].apply(_first_nonempty),
-                "Placa": grp["Placa"].apply(_most_frequent_placa),
-                "Infração": grp["Infração"].apply(_first_nonempty),
-                "Valor": grp["Valor"].apply(_first_nonempty),
-                "VALOR_NUM": grp["VALOR_NUM"].apply(agg_valornum),
+                "FLUIG":      grp.apply(lambda g: str(g.name)),
+                "Fontes":     grp["FONTE"].apply(agg_fontes),
+                "Status":     grp["Status"].apply(_first_nonempty),
+                "DT_M":       grp["DT_M"].apply(agg_data),
+                "Data":       grp["Data"].apply(_first_nonempty),
+                "Placa":      grp["Placa"].apply(_most_frequent_placa),
+                "Infração":   grp["Infração"].apply(_first_nonempty),
+                "Valor":      grp["Valor"].apply(_first_nonempty),
+                "VALOR_NUM":  grp["VALOR_NUM"].apply(agg_valornum),
                 "DESCONTADA": grp["DESCONTADA"].apply(lambda s: bool(s.astype(bool).any())),
             }).reset_index(drop=True)
 
-        # ---- Matriz de presença (FLUIG x fonte) ----
+        # Matriz presença
         presence = pd.DataFrame()
         if not base.empty:
             sources = sorted(base["FONTE"].unique().tolist())
@@ -696,105 +653,79 @@ class CondutorWindow(QWidget):
                         presence.loc[str(fl), src] = "✓"
             presence.index.name = "FLUIG"
 
-        # KPIs brutos (sem recorte de datas; o recorte é aplicado no _apply_filters)
         kpis = {
             "descontado": float(consolidated.loc[consolidated.get("DESCONTADA", False), "VALOR_NUM"].sum() or 0.0) if not consolidated.empty else 0.0,
-            "pendente": float(consolidated.loc[~consolidated.get("DESCONTADA", False), "VALOR_NUM"].sum() or 0.0) if not consolidated.empty else 0.0,
+            "pendente":   float(consolidated.loc[~consolidated.get("DESCONTADA", False), "VALOR_NUM"].sum() or 0.0) if not consolidated.empty else 0.0,
             "pontos_periodo": 0,
             "pontos_12m": 0,
         }
-
         return consolidated, presence, kpis
 
     def _apply_filters(self):
         q0, q1 = self.de_ini.date(), self.de_fim.date()
         a = pd.Timestamp(q0.year(), q0.month(), q0.day())
         b = pd.Timestamp(q1.year(), q1.month(), q1.day())
-        if a > b:
-            a, b = b, a
+        if a > b: a, b = b, a
 
-        dm = self._df_m.copy()
-        de = self._df_e.copy()
+        dm = self._df_m.copy(); de = self._df_e.copy()
 
-        # --- Recorte por datas ---
         if not dm.empty and "DT_M" in dm.columns:
             dm = dm[(dm["DT_M"].notna()) & (dm["DT_M"] >= a) & (dm["DT_M"] <= b)]
         if not de.empty and "DT_C" in de.columns:
             de = de[(de["DT_C"].notna()) & (de["DT_C"] >= a) & (de["DT_C"] <= b)]
 
-        # --- Filtro global (texto) ---
         dm = df_apply_global_texts(dm, self._global_values())
         de = df_apply_global_texts(de, self._global_values())
-        if not isinstance(dm, pd.DataFrame):
-            dm = pd.DataFrame()
-        if not isinstance(de, pd.DataFrame):
-            de = pd.DataFrame()
+        if not isinstance(dm, pd.DataFrame): dm = pd.DataFrame()
+        if not isinstance(de, pd.DataFrame): de = pd.DataFrame()
 
-        # --- Garantias de colunas necessárias ---
-        if "VALOR_NUM" not in dm.columns:
-            dm["VALOR_NUM"] = 0.0
-        if "DESCONTADA" not in dm.columns:
-            dm["DESCONTADA"] = False
-        else:
-            dm["DESCONTADA"] = dm["DESCONTADA"].astype(bool).fillna(False)
+        if "VALOR_NUM" not in dm.columns: dm["VALOR_NUM"] = 0.0
+        if "DESCONTADA" not in dm.columns: dm["DESCONTADA"] = False
+        else: dm["DESCONTADA"] = _series(dm, "DESCONTADA").astype(bool).fillna(False)
 
-        # --- KPIs: Multas no período ---
         vm = float(dm["VALOR_NUM"].sum() or 0.0) if not dm.empty else 0.0
-        self.k_multas.setText(str(len(dm)))
-        self.k_valor.setText(self._fmt_money(vm))
+        self.k_multas.setText(str(len(dm))); self.k_valor.setText(self._fmt_money(vm))
 
-        # --- KPIs: Combustível no período ---
-        if "LITROS_NUM" not in de.columns:
-            de["LITROS_NUM"] = 0.0
-        if "VALOR_NUM" not in de.columns:
-            de["VALOR_NUM"] = 0.0
+        if "LITROS_NUM" not in de.columns: de["LITROS_NUM"] = 0.0
+        if "VALOR_NUM" not in de.columns:  de["VALOR_NUM"] = 0.0
         ab_qt = len(de) if not de.empty else 0
         litros = float(de["LITROS_NUM"].sum() or 0.0) if not de.empty else 0.0
-        custo = float(de["VALOR_NUM"].sum() or 0.0) if not de.empty else 0.0
+        custo  = float(de["VALOR_NUM"].sum() or 0.0)  if not de.empty else 0.0
         self.k_abast.setText(str(ab_qt))
         self.k_litros.setText(self._fmt_num(litros))
         self.k_custo.setText(self._fmt_money(custo))
 
-        # --- KPIs: Descontado x Não descontado (no período filtrado) ---
         desc = float(dm.loc[dm["DESCONTADA"], "VALOR_NUM"].sum() or 0.0)
         pend = float(dm.loc[~dm["DESCONTADA"], "VALOR_NUM"].sum() or 0.0)
         self.k_desc.setText(self._fmt_money(desc))
         self.k_pend.setText(self._fmt_money(pend))
 
-        # --- KPIs: Pontuação no período (estimada pelo valor) ---
         pts = int(dm["VALOR_NUM"].map(_guess_points).sum()) if not dm.empty else 0
         self.k_pts_periodo.setText(str(pts))
 
-        # --- KPIs: Pontuação fixa últimos 12 meses (rolling) ---
         today = pd.Timestamp.today().normalize()
         a12 = today - pd.DateOffset(years=1)
         dm12 = self._df_m.copy()
         if not dm12.empty and "DT_M" in dm12.columns:
-            if "VALOR_NUM" not in dm12.columns:
-                dm12["VALOR_NUM"] = 0.0
+            if "VALOR_NUM" not in dm12.columns: dm12["VALOR_NUM"] = 0.0
             dm12 = dm12[(dm12["DT_M"].notna()) & (dm12["DT_M"] >= a12) & (dm12["DT_M"] <= today)]
             pts12 = int(dm12["VALOR_NUM"].map(_guess_points).sum())
         else:
             pts12 = 0
         self.k_pts_12m.setText(str(pts12))
 
-        # --- Atualiza tabelas ---
         self._fill_multas(dm)
         self._fill_extrato(de)
 
     def _fill_multas(self, dm: pd.DataFrame):
-        # Já consolidado: uma linha por FLUIG
         headers = ["FLUIG", "Fontes", "Status", "Data", "Placa", "Infração", "Valor (R$)", "Descontada?"]
         rows = []
         if not dm.empty:
             for _, r in dm.sort_values(["DT_M", "FLUIG"], ascending=[True, True]).iterrows():
                 rows.append([
-                    r.get("FLUIG", ""),
-                    r.get("Fontes", ""),
-                    r.get("Status", ""),
+                    r.get("FLUIG", ""), r.get("Fontes", ""), r.get("Status", ""),
                     (r["DT_M"].strftime("%d/%m/%Y") if pd.notna(r.get("DT_M", pd.NaT)) else str(r.get("Data", ""))),
-                    r.get("Placa", ""),
-                    r.get("Infração", ""),
+                    r.get("Placa", ""), r.get("Infração", ""),
                     f"{float(r.get('VALOR_NUM', 0)):.2f}",
                     "Sim" if bool(r.get("DESCONTADA", False)) else "Não",
                 ])
@@ -807,14 +738,11 @@ class CondutorWindow(QWidget):
             for _, r in de.sort_values("DT_C").iterrows():
                 rows.append([
                     r["DT_C"].strftime("%d/%m/%Y %H:%M") if pd.notna(r["DT_C"]) else "",
-                    r.get("PLACA", ""),
-                    r.get("MOTORISTA", ""),
-                    r.get("COMBUSTIVEL", ""),
+                    r.get("PLACA", ""), r.get("MOTORISTA", ""), r.get("COMBUSTIVEL", ""),
                     f"{float(r.get('LITROS_NUM', 0)):.2f}",
                     f"{float(r.get('VL_LITRO_NUM', 0)):.2f}",
                     f"{float(r.get('VALOR_NUM', 0)):.2f}",
-                    r.get("ESTABELECIMENTO", ""),
-                    r.get("CIDADE_UF", ""),
+                    r.get("ESTABELECIMENTO", ""), r.get("CIDADE_UF", ""),
                 ])
         self._fill(self.tbl_e, rows, headers)
 
@@ -845,7 +773,6 @@ class CondutorWindow(QWidget):
     def _fmt_num(self, x):
         return f"{float(x or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
-    # ---------------- Comparação (resumo) ----------------
     def _show_compare_summary(self, packs: dict):
         lines = ["Resumo comparativo (período selecionado):\n"]
         a = pd.Timestamp(self.de_ini.date().year(), self.de_ini.date().month(), self.de_ini.date().day())
@@ -864,7 +791,7 @@ class CondutorWindow(QWidget):
             multas_val = float(dm["VALOR_NUM"].sum() or 0.0)
             ab_qt = len(de)
             litros = float(de.get("LITROS_NUM", pd.Series(dtype=float)).sum() or 0.0)
-            custo = float(de.get("VALOR_NUM", pd.Series(dtype=float)).sum() or 0.0)
+            custo  = float(de.get("VALOR_NUM", pd.Series(dtype=float)).sum() or 0.0)
             pts = int(dm["VALOR_NUM"].map(_guess_points).sum()) if not dm.empty else 0
 
             lines.append(
@@ -872,11 +799,7 @@ class CondutorWindow(QWidget):
                 f"   - Multas: {multas_qt} (R$ {self._fmt_money(multas_val)}) | Pontos: {pts}\n"
                 f"   - Combustível: {ab_qt} | Litros: {self._fmt_num(litros)} | Custo: R$ {self._fmt_money(custo)}"
             )
-
         QMessageBox.information(self, "Comparar", "\n".join(lines))
 
-    def _on_chunk_ready(self, tag: str, df: pd.DataFrame):
-        pass
-
-    def _on_error(self, msg: str):
-        QMessageBox.warning(self, "Condutor", msg)
+    def _on_chunk_ready(self, tag: str, df: pd.DataFrame): pass
+    def _on_error(self, msg: str): QMessageBox.warning(self, "Condutor", msg)
