@@ -40,8 +40,8 @@ HEADERS_EXATOS = {
         "HODOMETRO OU HORIMETRO","KM RODADOS OU HORAS TRABALHADAS",
         "KM/LITRO OU LITROS/HORA","VALOR EMISSAO","CODIGO ESTABELECIMENTO",
         "NOME ESTABELECIMENTO","TIPO ESTABELECIMENTO","ENDERECO","BAIRRO","CIDADE","UF",
-        "INFORMACAO ADIDIONAL 1","INFORMACAO ADIDIONAL 2","INFORMACAO ADICIONAL 3",
-        "INFORMACAO ADIDIONAL 4","INFORMACAO ADIDIONAL 5","FORMA TRANSACAO",
+        "INFORMACAO ADIDIONAL 1","INFORMACAO ADICIONAL 2","INFORMACAO ADICIONAL 3",
+        "INFORMACAO ADICIONAL 4","INFORMACAO ADICIONAL 5","FORMA TRANSACAO",
         "CODIGO LIBERACAO RESTRICAO","SERIE POS","NUMERO CARTAO","FAMILIA VEICULO",
         "GRUPO RESTRICAO","CODIGO EMISSORA","RESPONSAVEL","TIPO ENTRADA HODOMETRO"
     ],
@@ -273,7 +273,14 @@ def processar_todas_planilhas(root: str, log=lambda *_: None, progress=lambda *_
     if not det.empty:
         status_col = _find_existing_col(det, CANDS["status"])
         if status_col and status_col in det.columns:
-            ok = det[status_col].astype(str).str.strip().str.upper().isin(["ABERTO","FINALIZADO","FINALIZADA"])
+            # normaliza e mantém somente ABERTA e FINALIZADA
+            st = det[status_col].astype(str).str.strip().str.upper()
+            st = st.replace({
+                "EM ABERTO": "ABERTA",
+                "ABERTO": "ABERTA",
+                "FINALIZADO": "FINALIZADA",
+            })
+            ok = st.isin(["ABERTA", "FINALIZADA"])
             det = det.loc[ok].reset_index(drop=True)
 
     bump("Processando: Fase Pastores…")

@@ -18,6 +18,7 @@ from gestao_frota_single import (
     PORTUGUESE_MONTHS,
     cfg_get, cfg_set, cfg_all
 )
+
 from utils import (
     ensure_status_cols, apply_shadow, _paint_status, to_qdate_flexible,
     build_multa_dir, _parse_dt_any, CheckableComboBox, SummaryDialog, ConferirFluigDialog,

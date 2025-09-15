@@ -14,6 +14,25 @@ from PyQt6.QtWidgets import (
 
 from organizar_planilhas import OrganizarPlanilhasDialog
 
+
+ORGAOS = ["DETRAN", "DEMUTRAM", "STTU", "DNIT", "PRF", "SEMUTRAM", "DMUT"]
+
+PORTUGUESE_MONTHS = {
+    1: "JANEIRO", 
+    2: "FEVEREIRO", 
+    3: "MARÇO", 
+    4: "ABRIL", 
+    5: "MAIO", 
+    6: "JUNHO",
+    7: "JULHO", 
+    8: "AGOSTO", 
+    9: "SETEMBRO", 
+    10: "OUTUBRO", 
+    11: "NOVEMBRO", 
+    12: "DEZEMBRO",
+}
+
+
 def ask_and_maybe_organize(parent=None):
     resp = QMessageBox.question(parent, "Organizar planilhas",
                                 "Deseja organizar as planilhas agora?\n"
