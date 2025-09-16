@@ -135,9 +135,7 @@ def cfg_set(key: str, value):
 def cfg_all() -> dict:
     return _cfg_load()
 
-# =========================
-# Login (com “lembrar”)
-# =========================
+
 def _enc(txt: str) -> str:
     return base64.b64encode((txt or "").encode("utf-8")).decode("ascii")
 
