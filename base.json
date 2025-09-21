@@ -5,14 +5,14 @@
   "geral_multas_csv": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/GERAL_MULTAS.csv",
   "multas_root": "T:/Veiculos/VEÍCULOS - RN/MULTAS",
   "pastores_dir": "T:/Veiculos/VEÍCULOS - RN/MULTAS",
-  "detalhamento_path": "Notificações de Multas - Detalhamento.xlsx",
-  "pastores_file": "Notificações de Multas - Fase Pastores.xlsx",
-  "condutor_identificado_path": "Notificações de Multas - Condutor Identificado.xlsx",
-  "extrato_geral_path": "ExtratoGeral.xlsx",
-  "extrato_simplificado_path": "ExtratoSimplificado.xlsx",
+  "detalhamento_path": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/Notificações de Multas - Detalhamento.xlsx",
+  "pastores_file": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/Notificações de Multas - Fase Pastores.xlsx",
+  "condutor_identificado_path": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/Notificações de Multas - Condutor Identificado.xlsx",
+  "extrato_geral_path": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/ExtratoGeral.xlsx",
+  "extrato_simplificado_path": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/ExtratoSimplificado.xlsx",
   "users_file": "users.csv",
   "detalhamento2_path": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/Notificações de Multas - Detalhamento.xlsx",
   "detalhamento1_path": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/Notificações de Multas - Detalhamento.xlsx",
   "condutor_ident_path": "c:\\Users\\clnogueira\\Desktop\\GITHUB\\FROTAS\\Notificações de Multas - Condutor Identificado.xlsx",
-  "responsavel_path": "Responsavel.xlsx"
+  "responsavel_path": "C:/Users/clnogueira/Desktop/GITHUB/FROTAS/PLANILHAS/Responsavel.xlsx"
 }
