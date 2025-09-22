@@ -4,6 +4,9 @@ from multas import InfraMultasWindow
 import pandas as pd
 from pathlib import Path
 
+
+# main_window.py (topo)
+from revisao import RevisaoWindow   # ⬅️ NOVO
 from cenarios_gerais import CenariosGeraisWindow  
 
 from PyQt6.QtWidgets import (
@@ -23,7 +26,6 @@ from utils import apply_shadow, CheckableComboBox, ensure_status_cols, df_apply_
 from multas import InfraMultasWindow
 from relatorios import RelatorioWindow
 from combustivel import CombustivelMenu, CombustivelWindow
-
 
 
 from utils import read_table_any  # <--- importar
@@ -458,12 +460,6 @@ def _parse_money(s):
     except:
         return 0.0
     
-
-
-    
-
-
-
 
 class CenarioGeralWindow(QWidget):
 
@@ -1012,22 +1008,39 @@ class MultasMenu(QWidget):
         gv.addWidget(b2, 0, 1)
         v.addWidget(card)
 
+from PyQt6.QtWidgets import (
+    QMainWindow, QWidget, QTabWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QLabel, QPushButton, QMessageBox, QFileDialog, QComboBox, QDateEdit,
+    QTableWidget, QTableWidgetItem, QHeaderView, QFrame, QDialog
+)
+from PyQt6.QtCore import Qt, QDate
+from PyQt6.QtGui import QFont, QColor, QKeySequence
+from pathlib import Path
+
+# já estão no topo do seu arquivo:
+# from revisao import RevisaoWindow
+# from cenarios_gerais import CenariosGeraisWindow
+# from gestao_frota_single import (BaseTab, MODULES, DATE_FORMAT, DATE_COLS, STATUS_COLOR, cfg_get, cfg_set, cfg_all)
+# from utils import apply_shadow, CheckableComboBox, ensure_status_cols, df_apply_global_texts, read_table_any
+# from multas import InfraMultasWindow
+# from relatorios import RelatorioWindow
+# from combustivel import CombustivelWindow
+# + suas outras imports e funções auxiliares (_read_table_safely etc.)
 
 class MainWindow(QMainWindow):
-
     def __init__(self, user_email: str | None = None):
         super().__init__()
         self.setWindowTitle("GESTÃO DE FROTAS")
         self.resize(1280, 860)
 
-        # ---- Área de abas ----
+        # ---- Abas ----
         self.tab_widget = QTabWidget()
         self.tab_widget.setTabsClosable(True)
         self.tab_widget.setDocumentMode(True)
         self.tab_widget.tabCloseRequested.connect(self.close_tab)
         self.setCentralWidget(self.tab_widget)
 
-        # ---- Home / Início ----
+        # ---- Home ----
         home = QWidget()
         hv = QVBoxLayout(home)
 
@@ -1046,7 +1059,7 @@ class MainWindow(QMainWindow):
                          alignment=Qt.AlignmentFlag.AlignCenter)
         hv.addWidget(title_card)
 
-        # Cartão com os botões grandes
+        # Cartão com botões
         grid_card = QFrame(); grid_card.setObjectName("card"); apply_shadow(grid_card, radius=18)
         gv = QGridLayout(grid_card); gv.setContentsMargins(18, 18, 18, 18)
 
@@ -1056,9 +1069,10 @@ class MainWindow(QMainWindow):
             ("Combustível", self.open_combustivel),
             ("Relatórios", self.open_relatorios),
             ("Alertas", self.open_alertas),
-            ("Condutor", self.open_condutor),   # ✅ aqui o botão existe
+            ("Condutor", self.open_condutor),
+            ("Revisão", self.open_revisao),         # ✅ agora existe
+            ("Cenários Gerais", self.open_cenarios_gerais),
         ]
-
 
         for i, (label, slot) in enumerate(buttons):
             b = QPushButton(label)
@@ -1077,7 +1091,7 @@ class MainWindow(QMainWindow):
         bar.addStretch(1); bar.addWidget(out)
         hv.addLayout(bar)
 
-        # Coloca a Home como primeira aba
+        # Home como primeira aba
         self.tab_widget.addTab(home, "Início")
 
     # ===== Utilidades de abas =====
@@ -1097,27 +1111,81 @@ class MainWindow(QMainWindow):
         self.tab_widget.addTab(w, title)
         self.tab_widget.setCurrentWidget(w)
 
+    def close_tab(self, index):
+        """Fecha abas (permite fechar qualquer aba exceto, se quiser, proteja 'Início')."""
+        # Opcional: impedir fechar a 'Início'
+        if self.tab_widget.tabText(index) == "Início":
+            return
+        w = self.tab_widget.widget(index)
+        self.tab_widget.removeTab(index)
+        if w is not None:
+            w.deleteLater()
+
+    # ===== Ações dos botões (na MainWindow) =====
+    def open_base(self):
+        try:
+            self.add_or_focus("Base", lambda: BaseTab())
+        except Exception as e:
+            QMessageBox.warning(self, "Base", f"Não foi possível abrir a Base.\n{e}")
+
+    def open_multas(self):
+        self.add_or_focus("Infrações e Multas", lambda: InfraMultasWindow())
+
+    def open_combustivel(self):
+        try:
+            self.add_or_focus("Combustível", lambda: CombustivelWindow())
+        except Exception as e:
+            QMessageBox.warning(self, "Combustível", str(e))
+
+    def open_relatorios(self):
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "Abrir arquivo(s) de relatório", "",
+            "Planilhas (*.xlsx *.xls *.csv)"
+        )
+        if not paths:
+            return
+        for p in paths:
+            try:
+                stem = Path(p).stem
+                title = f"Relatório — {stem}"
+                self.add_or_focus(title, lambda p_=p: RelatorioWindow(p_))
+            except Exception as e:
+                QMessageBox.warning(self, "Relatórios", f"Não foi possível abrir '{p}'.\n{e}")
+
+    def open_alertas(self):
+        try:
+            self.add_or_focus("Alertas", lambda: AlertsTab())
+        except Exception as e:
+            QMessageBox.warning(self, "Alertas", f"Não foi possível abrir Alertas.\n{e}")
+
+    def open_condutor(self):
+        try:
+            from condutor import CondutorWindow
+            self.add_or_focus("Condutor — Busca Integrada", lambda: CondutorWindow())
+        except Exception as e:
+            QMessageBox.warning(self, "Condutor", f"Não foi possível abrir a tela de Condutor.\n{e}")
+
+    def open_revisao(self):
+        """✅ NOVO: abre a tela Revisão (usa RevisaoWindow do revisao.py)."""
+        try:
+            self.add_or_focus("Revisão", lambda: RevisaoWindow())
+        except Exception as e:
+            QMessageBox.critical(self, "Revisão", f"Não foi possível abrir Revisão.\n{e}")
 
     def open_cenarios_gerais(self):
-
+        """Abre o container que permite múltiplas abas de Cenários Gerais."""
+        # Foca se já existir
         for i in range(self.tab_widget.count()):
-            w = self.tab_widget.widget(i)
-            if isinstance(w, CenariosGeraisContainer):
+            if self.tab_widget.tabText(i).startswith("Cenários Gerais"):
                 self.tab_widget.setCurrentIndex(i)
                 return
-
         cont = CenariosGeraisContainer(self, titulo_base="Cenários Gerais")
         idx = self.tab_widget.addTab(cont, "Cenários Gerais")
         self.tab_widget.setCurrentIndex(idx)
 
+    def logout(self):
+        self.close()
 
-
-
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QTabWidget, QLabel, QMessageBox, QShortcut
-)
-from PyQt6.QtGui import QKeySequence
 
 class CenariosGeraisContainer(QWidget):
     """
@@ -1132,45 +1200,38 @@ class CenariosGeraisContainer(QWidget):
 
     def _build_ui(self):
         layout = QVBoxLayout(self)
+
+        # Barra superior
         top = QHBoxLayout()
+        lbl = QLabel(self.titulo_base); lbl.setFont(QFont("Arial", 16, QFont.Weight.Bold))
         self.btn_new = QPushButton("Novo Cenário")
         self.btn_new.setToolTip("Abrir uma nova aba de Cenários Gerais (Ctrl+N)")
-        top.addWidget(QLabel(self.titulo_base))
-        top.addStretch(1)
-        top.addWidget(self.btn_new)
+        top.addWidget(lbl); top.addStretch(1); top.addWidget(self.btn_new)
         layout.addLayout(top)
 
+        # Abas internas
         self.tabsHost = QTabWidget()
         self.tabsHost.setTabsClosable(True)
         self.tabsHost.setMovable(True)
         self.tabsHost.tabCloseRequested.connect(self._close_tab)
         layout.addWidget(self.tabsHost, 1)
 
-    def close_tab(self, index):
-        """Impede fechar a Home (índice 0); fecha as demais."""
-        if index == 0:
-            return
-        w = self.tab_widget.widget(index)
-        self.tab_widget.removeTab(index)
-        if w is not None:
-            w.deleteLater()
-
-
-        # atalhos
+        # Atalhos
+        from PyQt6.QtWidgets import QShortcut
         QShortcut(QKeySequence("Ctrl+N"), self, activated=self.new_tab)
         QShortcut(QKeySequence("Ctrl+W"), self, activated=self._close_current_tab)
 
-        # primeira aba
+        # Primeira aba
         self.new_tab()
 
-        # sinais
+        # Sinais
         self.btn_new.clicked.connect(self.new_tab)
 
-    # ---- API pública ----
+    # ---- API ----
     def new_tab(self):
         """Cria uma nova aba com uma instância de CenariosGeraisWindow."""
         try:
-            page = CenariosGeraisWindow()  # usa sua classe existente (já é QWidget)
+            page = CenariosGeraisWindow()  # sua classe já é QWidget
         except Exception as e:
             QMessageBox.critical(self, "Cenários Gerais", f"Falha ao criar cenário: {e}")
             return
@@ -1192,68 +1253,3 @@ class CenariosGeraisContainer(QWidget):
         idx = self.tabsHost.currentIndex()
         if idx >= 0:
             self._close_tab(idx)
-
-
-    def close_tab(self, index):
-        """Impede fechar a Home (índice 0); fecha as demais."""
-        if index == 0:
-            return
-        w = self.tab_widget.widget(index)
-        self.tab_widget.removeTab(index)
-        w.deleteLater()
-
-    # ===== Ações dos botões =====
-    def open_base(self):
-        try:
-            from gestao_frota_single import BaseTab
-            self.add_or_focus("Base", lambda: BaseTab())
-        except Exception as e:
-            QMessageBox.warning(self, "Base", f"Não foi possível abrir a Base.\n{e}")
-
-    def open_multas(self):
-        self.add_or_focus("Infrações e Multas", lambda: InfraMultasWindow())
-
-    def open_combustivel(self):
-        try:
-            self.add_or_focus("Combustível", lambda: CombustivelWindow())
-        except Exception as e:
-            QMessageBox.warning(self, "Combustível", str(e))
-
-    def open_relatorios(self):
-        """
-        Permite selecionar UMA OU VÁRIAS planilhas e abre cada uma em sua própria aba:
-        'Relatório — <nome_da_planilha>'.
-        Se a aba já existir, apenas foca.
-        """
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "Abrir arquivo(s) de relatório", "",
-            "Planilhas (*.xlsx *.xls *.csv)"
-        )
-        if not paths:
-            return
-
-        for p in paths:
-            try:
-                stem = Path(p).stem
-                title = f"Relatório — {stem}"
-                self.add_or_focus(title, lambda p_=p: RelatorioWindow(p_))
-            except Exception as e:
-                QMessageBox.warning(self, "Relatórios", f"Não foi possível abrir '{p}'.\n{e}")
-
-    def open_alertas(self):
-        """Abre a aba de Alertas (corrigido; antes o método não existia)."""
-        try:
-            self.add_or_focus("Alertas", lambda: AlertsTab())
-        except Exception as e:
-            QMessageBox.warning(self, "Alertas", f"Não foi possível abrir Alertas.\n{e}")
-
-    def open_condutor(self):
-        """Abre a tela de Condutor em uma nova aba."""
-        try:
-            from condutor import CondutorWindow
-            self.add_or_focus("Condutor — Busca Integrada", lambda: CondutorWindow())
-        except Exception as e:
-            QMessageBox.warning(self, "Condutor", f"Não foi possível abrir a tela de Condutor.\n{e}")
-
-    def logout(self):
-        self.close()

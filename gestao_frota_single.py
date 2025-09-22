@@ -511,6 +511,9 @@ class DependenciesDialog(QDialog):
             cfg_set(k, le.text().strip())
         self.accept()
 
+from revisao import RevisaoWindow
+
+
 class MainWindow(QMainWindow):
     def __init__(self, user_email: str | None = None):
         super().__init__()
@@ -543,6 +546,7 @@ class MainWindow(QMainWindow):
         grid_card = QFrame(); grid_card.setObjectName("card"); apply_shadow(grid_card, radius=18)
         gv = QGridLayout(grid_card); gv.setContentsMargins(18, 18, 18, 18)
 
+        # ✅ Incluí “Revisão” e criei open_revisao()
         buttons = [
             ("Base", self.open_base),
             ("Infrações e Multas", self.open_multas),
@@ -550,6 +554,7 @@ class MainWindow(QMainWindow):
             ("Relatórios", self.open_relatorios),
             ("Alertas", self.open_alertas),
             ("Condutor", self.open_condutor),
+            ("Revisão", self.open_revisao),
         ]
         for i, (label, slot) in enumerate(buttons):
             b = QPushButton(label)
@@ -568,13 +573,7 @@ class MainWindow(QMainWindow):
 
         self.tab_widget.addTab(home, "Início")
 
-    def open_condutor(self):
-        try:
-            from condutor import CondutorWindow
-            self.add_or_focus("Condutor", lambda: CondutorWindow())
-        except Exception as e:
-            QMessageBox.warning(self, "Condutor", f"Erro abrindo Condutor.\n{e}")
-
+    # ===== Utilidades de abas =====
     def add_or_focus(self, title, factory):
         for idx in range(self.tab_widget.count()):
             if self.tab_widget.tabText(idx).strip().lower() == str(title).strip().lower():
@@ -585,12 +584,14 @@ class MainWindow(QMainWindow):
         self.tab_widget.setCurrentWidget(w)
 
     def close_tab(self, index: int):
-        if index == 0:
+        if index == 0:  # impede fechar “Início”
             return
         w = self.tab_widget.widget(index)
         self.tab_widget.removeTab(index)
-        w.deleteLater()
+        if w:
+            w.deleteLater()
 
+    # ===== Ações dos botões =====
     def open_base(self):
         try:
             self.add_or_focus("Base", lambda: BaseTab())
@@ -627,6 +628,22 @@ class MainWindow(QMainWindow):
 
     def open_alertas(self):
         self.add_or_focus("Alertas", lambda: AlertsTab())
+
+    def open_condutor(self):
+        try:
+            from condutor import CondutorWindow
+            self.add_or_focus("Condutor", lambda: CondutorWindow())
+        except Exception as e:
+            QMessageBox.warning(self, "Condutor", f"Erro abrindo Condutor.\n{e}")
+
+    def open_revisao(self):
+        """Abre a tela Revisão (classe RevisaoWindow do revisao.py)."""
+        try:
+            self.add_or_focus("Revisão", lambda: RevisaoWindow())
+        except Exception as e:
+            QMessageBox.critical(self, "Revisão", f"Não foi possível abrir Revisão.\n{e}")
+
+
 
 def run():
     app = QApplication([])
