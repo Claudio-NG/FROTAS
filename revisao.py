@@ -1,59 +1,25 @@
+# revisao_app.py
 from __future__ import annotations
 
+import json
 import math
-import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, date
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QLineEdit, QPushButton, QTabWidget,
-    QTableWidget, QTableWidgetItem, QComboBox, QFileDialog, QMessageBox, QSizePolicy
+    QTableWidget, QTableWidgetItem, QComboBox, QFileDialog, QMessageBox, QSizePolicy,
+    QApplication, QFrame
 )
 
-# ===================== Caminhos (robustos e portáveis) =====================
-
-def _strip_accents(s: str) -> str:
-    return "".join(ch for ch in unicodedata.normalize("NFD", s) if unicodedata.category(ch) != "Mn")
-
-def _norm_fname(s: str) -> str:
-    # normaliza para comparações tolerantes: sem acento + casefold + remove espaços extras
-    return _strip_accents(str(s)).casefold().replace(" ", "")
-
-def _resolve_xlsx(base: Path, *hints: str) -> Path:
-    """
-    Procura por um .xlsx no diretório `base` batendo contra *hints*
-    com tolerância a acentos, espaços, e maiúsculas/minúsculas.
-    Se não achar, retorna base / hints[0] (para mensagem de erro clara).
-    """
-    files = [p for p in base.glob("*.xlsx")]
-    if not files:
-        return base / hints[0]
-    norm_map = {_norm_fname(p.name): p for p in files}
-    for h in hints:
-        n = _norm_fname(h)
-        # match exato
-        if n in norm_map:
-            return norm_map[n]
-        # match por startswith (ajuda p.ex. "revisao.xlsx" vs "revisao (1).xlsx")
-        cand = next((p for k, p in norm_map.items() if k.startswith(n)), None)
-        if cand:
-            return cand
-    return base / hints[0]
-
-# BASE = pasta onde este arquivo está
-BASE = Path(__file__).resolve().parent
-
-# Arquivos (com múltiplos hints para tolerar variações)
-ARQ_RESP = _resolve_xlsx(BASE, "Responsavel.xlsx")
-ARQ_REV  = _resolve_xlsx(BASE, "REVISÃO.xlsx", "REVISAO.xlsx", "Revisao.xlsx", "REVISÃO.xlsx")
-ARQ_CAD  = _resolve_xlsx(BASE, "Chassi e Renavam.xlsx", "Chassi_e_Renavam.xlsx")
-ARQ_EXT  = _resolve_xlsx(BASE, "ExtratoGeral.xlsx", "Extrato Geral.xlsx")
-
+# ===================== Config & Const =====================
+APP_DIR = Path(__file__).resolve().parent
+CFG_PATH = APP_DIR / "revisao_paths.json"   # onde salvamos os caminhos
 IGNORAR_STATUS = {"VENDIDO", "SAIU DA FROTA", "BAIXADO", "BAIXA"}
 
 # ===================== Helpers =====================
@@ -86,7 +52,6 @@ def _to_num(x):
         return math.nan
 
 def _find_col(cols: List[str], *hints: str) -> Optional[str]:
-    """Encontra a primeira coluna cujo nome contenha TODOS os termos de um hint (casefold)."""
     L = [c for c in cols]
     low = [c.lower() for c in cols]
     for hint in hints:
@@ -95,6 +60,23 @@ def _find_col(cols: List[str], *hints: str) -> Optional[str]:
             if all(p in lc for p in parts):
                 return L[i]
     return None
+
+def _fmt_date(d):
+    return "" if (d is None or pd.isna(d)) else d.strftime("%d/%m/%Y")
+
+def _fmt_num(x):
+    if x is None or pd.isna(x):
+        return ""
+    try:
+        return f"{int(round(float(x))):,}".replace(",", ".")
+    except Exception:
+        try:
+            return f"{float(x):,.0f}".replace(",", "_").replace(".", ",").replace("_", ".")
+        except Exception:
+            return str(x)
+
+def _bool_tag(x, on="Renovar"):
+    return on if bool(x) else "-"
 
 # ===================== Colunas =====================
 
@@ -115,52 +97,52 @@ class ColunasMap:
     oficina: Optional[str] = None
     custo_rev: Optional[str] = None
 
-    data_inicio: Optional[str] = None  # data de compra/entrada
+    data_inicio: Optional[str] = None
     status: Optional[str] = None
 
-    data_ext: Optional[str] = None     # Extrato – data da transação
-    km_ext: Optional[str] = None       # Extrato – hodômetro/horímetro
+    data_ext: Optional[str] = None
+    km_ext: Optional[str] = None
 
 # ===================== Núcleo =====================
 
 class RevisaoCore:
-    """Carrega, normaliza e calcula previsões de revisão por DATA e KM.
-
-    Regras:
-    - Ignorar STATUS em {VENDIDO, SAIU DA FROTA, BAIXADO, BAIXA}.
-    - Revisão por tempo: 1 ano após a data base.
-    - Revisão por km: 10.000 km após o km base.
-    - Data base = última revisão; se não houver, data de início (compra/entrada).
-    - Renovação: idade >= 3 anos do ANO MODELO agora ou até a próxima data prevista.
     """
-
-    def __init__(self, base: Path = BASE):
-        self.base_path = base
+    - Ignora STATUS: VENDIDO/SAIU DA FROTA/BAIXADO/BAIXA
+    - Revisão por data (1 ano) OU km (10.000) a partir da base
+    - Base = data da última revisão; se ausente, data de início/compra
+    - Renovação: >= 3 anos do ANO MODELO (agora ou na próxima)
+    """
+    def __init__(self,
+                 arq_resp: Optional[Path],
+                 arq_rev: Optional[Path],
+                 arq_cad: Optional[Path],
+                 arq_ext: Optional[Path]):
+        self.paths = {
+            "resp": Path(arq_resp) if arq_resp else None,
+            "rev":  Path(arq_rev)  if arq_rev  else None,
+            "cad":  Path(arq_cad)  if arq_cad  else None,
+            "ext":  Path(arq_ext)  if arq_ext  else None,
+        }
         self.hoje: date = datetime.now().date()
-        # DataFrames brutos
-        self.resp = self._load(ARQ_RESP)
-        self.rev  = self._load(ARQ_REV)
-        self.cad  = self._load(ARQ_CAD)
-        self.ext  = self._load(ARQ_EXT)
 
-        # Mapeamento de colunas
+        self.resp = self._load(self.paths["resp"])
+        self.rev  = self._load(self.paths["rev"])
+        self.cad  = self._load(self.paths["cad"])
+        self.ext  = self._load(self.paths["ext"])
+
         self.cols = self._inferir_colunas()
-
-        # Sanitização básica
         self._sanitize_all()
-
-        # Filtrar vendidos/baixados logo nas bases suficientes
         self._apply_status_filters()
 
-        # Estruturas derivadas
         self.base_ult_revisao = self._build_ultima_revisao_por_placa()
         self.km_por_abastecimento = self._build_km_abastecimentos()
 
-        # Resultado principal
-        self.previsao = self._build_previsao()  # DataFrame com linhas por placa
+        self.previsao = self._build_previsao()
 
     # -------- IO --------
-    def _load(self, path: Path) -> pd.DataFrame:
+    def _load(self, path: Optional[Path]) -> pd.DataFrame:
+        if not path:
+            return pd.DataFrame()
         if not path.exists():
             print(f"[Revisão] Arquivo não encontrado: {path}")
             return pd.DataFrame()
@@ -175,7 +157,6 @@ class RevisaoCore:
     def _inferir_colunas(self) -> ColunasMap:
         cmap = ColunasMap()
 
-        # RESPONSAVEL
         if not self.resp.empty:
             cols = list(self.resp.columns)
             cmap.placa       = _find_col(cols, "placa") or cmap.placa
@@ -189,36 +170,29 @@ class RevisaoCore:
             cmap.ano_modelo  = _find_col(cols, "ano modelo", "ano_modelo", "ano")
             cmap.status      = _find_col(cols, "status")
 
-        # REVISAO
         if not self.rev.empty:
             cols = list(self.rev.columns)
             cmap.placa    = _find_col(cols, "placa") or cmap.placa
-            cmap.data_rev = (
-                _find_col(cols, "data", "última revisão")
-                or _find_col(cols, "data revisão")
-                or _find_col(cols, "data")
-            )
+            cmap.data_rev = (_find_col(cols, "data", "última revisão")
+                             or _find_col(cols, "data revisão")
+                             or _find_col(cols, "data"))
             cmap.km_rev   = _find_col(cols, "km", "quilometr")
             cmap.oficina  = _find_col(cols, "oficina")
             cmap.custo_rev = _find_col(cols, "custo", "valor")
 
-        # CADASTRO
         if not self.cad.empty:
             cols = list(self.cad.columns)
             cmap.placa       = _find_col(cols, "placa") or cmap.placa
-            cmap.data_inicio = (
-                _find_col(cols, "data início")
-                or _find_col(cols, "data entrada")
-                or _find_col(cols, "início")
-                or _find_col(cols, "inicio")
-            )
+            cmap.data_inicio = (_find_col(cols, "data início")
+                                or _find_col(cols, "data entrada")
+                                or _find_col(cols, "início")
+                                or _find_col(cols, "inicio"))
             cmap.marca      = cmap.marca or _find_col(cols, "marca", "fabricante")
             cmap.modelo     = cmap.modelo or _find_col(cols, "modelo")
             cmap.ano_modelo = cmap.ano_modelo or _find_col(cols, "ano modelo", "ano fabricação", "ano")
             if not cmap.status:
                 cmap.status = _find_col(cols, "status")
 
-        # EXTRATO GERAL
         if not self.ext.empty:
             cols = list(self.ext.columns)
             cmap.placa   = _find_col(cols, "placa") or cmap.placa
@@ -234,35 +208,24 @@ class RevisaoCore:
         df = df.copy()
         df.columns = [str(c).strip() for c in df.columns]
 
-        # Placa normalizada
-        placa_col = None
-        for c in df.columns:
-            if c.lower().startswith("placa"):
-                placa_col = c; break
-        if placa_col:
-            df["placa_norm"] = df[placa_col].map(_norm_placa)
-        else:
-            df["placa_norm"] = ""
+        placa_col = next((c for c in df.columns if c.lower().startswith("placa")), None)
+        df["placa_norm"] = df[placa_col].map(_norm_placa) if placa_col else ""
 
-        # Datas genéricas
         for cname in df.columns:
             if "data" in cname.lower():
                 df[cname] = df[cname].map(_to_date)
-        # KM / hodômetro
+
         for cname in df.columns:
             cl = cname.lower()
             if ("km" in cl) or ("hodometro" in cl) or ("horimetro" in cl):
                 df[cname] = pd.to_numeric(df[cname], errors="coerce")
-        # Valores
+
         for cname in df.columns:
             if ("valor" in cname.lower()) or ("custo" in cname.lower()):
                 df[cname] = df[cname].map(_to_num)
-        # Status auxiliar
+
         stcol = next((c for c in df.columns if "status" in c.lower()), None)
-        if stcol:
-            df["status_norm_any"] = df[stcol].astype(str).str.upper().str.strip()
-        else:
-            df["status_norm_any"] = ""
+        df["status_norm_any"] = df[stcol].astype(str).str.upper().str.strip() if stcol else ""
         return df
 
     def _sanitize_all(self):
@@ -272,7 +235,6 @@ class RevisaoCore:
         self.ext  = self._sanitize_df(self.ext)
 
     def _apply_status_filters(self):
-        # Remove vendidos/baixados nas bases onde fizer sentido
         def _filter(df: pd.DataFrame) -> pd.DataFrame:
             if df.empty or "status_norm_any" not in df.columns:
                 return df
@@ -281,7 +243,6 @@ class RevisaoCore:
 
         self.resp = _filter(self.resp)
         self.cad  = _filter(self.cad)
-        # extrato/revisão normalmente não trazem esse status
 
     # -------- Bases derivadas --------
     def _build_ultima_revisao_por_placa(self) -> pd.DataFrame:
@@ -302,6 +263,10 @@ class RevisaoCore:
         if col_of:   ren[col_of]   = "oficina"
         if col_cst:  ren[col_cst]  = "custo_rev"
         g = g.rename(columns=ren)
+
+        if "km_na_rev" in g.columns:
+            g.loc[g["km_na_rev"] == 0, "km_na_rev"] = pd.NA  # ignora zeros suspeitos
+
         for need in ["data_ult_rev", "km_na_rev", "oficina", "custo_rev"]:
             if need not in g.columns:
                 g[need] = pd.NA
@@ -317,10 +282,8 @@ class RevisaoCore:
         if col_data: ren[col_data] = "data_abast"
         if col_km:   ren[col_km]   = "km_abast"
         df = df.rename(columns=ren)
-        if "km_abast" not in df.columns:
-            df["km_abast"] = pd.NA
-        if "data_abast" not in df.columns:
-            df["data_abast"] = pd.NaT
+        if "km_abast" not in df.columns:   df["km_abast"] = pd.NA
+        if "data_abast" not in df.columns: df["data_abast"] = pd.NaT
         df = df[pd.notna(df["data_abast"])]
         return df[["placa_norm", "data_abast", "km_abast"]]
 
@@ -347,7 +310,6 @@ class RevisaoCore:
         return row["km_abast"], row["data_abast"]
 
     def _build_previsao(self) -> pd.DataFrame:
-        # Universo de placas
         bases = []
         for df in [self.resp, self.rev, self.cad, self.ext]:
             if not df.empty and "placa_norm" in df.columns:
@@ -357,19 +319,16 @@ class RevisaoCore:
                 "placa","responsavel","unidade","regiao","bloco","igreja","marca","modelo","ano_modelo",
                 "data_base","prox_data_por_tempo","dias_faltando",
                 "km_base","data_km_base","km_meta","km_ultimo","data_km_ultimo","km_faltando",
-                "oficina","status","renovacao_agora","renovacao_na_proxima"
+                "oficina","status","renovacao_agora","renovacao_na_proxima","prox_real_em_dias"
             ])
         placas = pd.concat(bases, ignore_index=True).drop_duplicates()
         placas = placas[placas["placa_norm"] != ""]
 
-        # Atributos RESP/CAD (preferindo RESP; completando com CAD)
         det = pd.DataFrame({"placa_norm": placas["placa_norm"]})
         for src in (self.resp, self.cad):
-            if src.empty:
-                continue
+            if src.empty: continue
             g = src.groupby("placa_norm").last().reset_index()
-            def _take(col):
-                return g[col] if (col and col in g.columns) else pd.Series([pd.NA]*len(g))
+            def _take(col): return g[col] if (col and col in g.columns) else pd.Series([pd.NA]*len(g))
             pack = pd.DataFrame({
                 "placa_norm": g["placa_norm"],
                 "responsavel": _take(self.cols.responsavel),
@@ -385,10 +344,7 @@ class RevisaoCore:
             for c in ["responsavel","unidade","regiao","bloco","igreja","marca","modelo","ano_modelo"]:
                 det[c] = det[c].ffill().bfill() if c in det.columns else det.get(c, pd.Series())
 
-        # Última revisão
         ult = self.base_ult_revisao
-
-        # Data de início
         cad = self.cad.copy()
         if self.cols.data_inicio and self.cols.data_inicio in cad.columns:
             cad = cad.rename(columns={self.cols.data_inicio: "data_inicio"})
@@ -420,12 +376,10 @@ class RevisaoCore:
             data_ini    = r.get("data_inicio")
             oficina     = r.get("oficina")
 
-            # Critério DATA
             data_base = data_ult if pd.notna(data_ult) else (data_ini if pd.notna(data_ini) else None)
             prox_data = (data_base + timedelta(days=365)) if data_base else None
             dias_falt = (prox_data - self.hoje).days if prox_data else None
 
-            # Critério KM
             if pd.notna(data_ult):
                 km_base, data_km_base = self._closest_refuel_to(placa, data_ult)
                 km_meta = (km_base + 10_000) if (km_base is not None and not pd.isna(km_base)) else None
@@ -441,25 +395,27 @@ class RevisaoCore:
             else:
                 km_falt = None
 
-            # Status
             status = "Desconhecido"
             if dias_falt is not None or km_falt is not None:
                 vencido = (dias_falt is not None and dias_falt < 0) or (km_falt is not None and km_falt < 0)
                 atencao = (dias_falt is not None and dias_falt < 30) or (km_falt is not None and km_falt < 1000)
-                if vencido:
-                    status = "Vencido"
-                elif atencao:
-                    status = "Atenção"
-                else:
-                    status = "Em dia"
+                if vencido:   status = "Vencido"
+                elif atencao: status = "Atenção"
+                else:         status = "Em dia"
 
-            # Renovação (3 anos do ANO MODELO)
             renov_agora = False
             renov_prox  = False
             if ano_mod:
                 renov_agora = (self.hoje.year - ano_mod) >= 3
                 if prox_data:
                     renov_prox = (prox_data.year - ano_mod) >= 3
+
+            # “próxima real” (mínimo entre tempo e km em dias, usando 50 km/dia como heurística)
+            prox_por_km_em_dias = int(km_falt/50) if (km_falt is not None) else None
+            if dias_falt is not None and prox_por_km_em_dias is not None:
+                prox_real_em_dias = min(dias_falt, prox_por_km_em_dias)
+            else:
+                prox_real_em_dias = dias_falt if dias_falt is not None else prox_por_km_em_dias
 
             rows.append({
                 "placa": placa,
@@ -484,10 +440,11 @@ class RevisaoCore:
                 "status": status,
                 "renovacao_agora": renov_agora,
                 "renovacao_na_proxima": renov_prox,
+                "prox_real_em_dias": prox_real_em_dias,
             })
 
         out = pd.DataFrame(rows)
-        # Ordenação por criticidade
+
         def _ord(row):
             a = row["dias_faltando"] if row["dias_faltando"] is not None else 9e9
             b = row["km_faltando"]   if row["km_faltando"]   is not None else 9e9
@@ -497,7 +454,7 @@ class RevisaoCore:
             out = out.sort_values("ord").drop(columns=["ord"])
         return out
 
-    # --------- Agregações (para abas) ---------
+    # --------- Agregações ---------
     def agg_calendario(self) -> pd.DataFrame:
         df = self.previsao.copy()
         if df.empty or "prox_data_por_tempo" not in df.columns:
@@ -578,10 +535,12 @@ class RevisaoCore:
         mask = (df["status"].isin(["Vencido","Atenção"]))
         cols = [
             "placa","responsavel","unidade","regiao","dias_faltando","km_faltando",
-            "prox_data_por_tempo","status","renovacao_agora","renovacao_na_proxima"
+            "prox_data_por_tempo","status","renovacao_agora","renovacao_na_proxima","prox_real_em_dias"
         ]
         cols = [c for c in cols if c in df.columns]
-        return df.loc[mask, cols].sort_values(["status","dias_faltando","km_faltando"], ascending=[True, True, True])
+        return df.loc[mask, cols].sort_values(
+            ["status","dias_faltando","km_faltando"], ascending=[True, True, True]
+        )
 
     def view_sem_historico(self) -> pd.DataFrame:
         df = self.previsao.copy()
@@ -602,7 +561,7 @@ class RevisaoCore:
             if v.notna().any():
                 custo_medio = v.mean()
         if not custo_medio or math.isnan(custo_medio):
-            custo_medio = 500.0  # fallback: referência
+            custo_medio = 500.0
         df = df[pd.notna(df["prox_data_por_tempo"])]
         if df.empty:
             return pd.DataFrame(columns=["ano_mes","custo_previsto"])
@@ -623,16 +582,12 @@ class RevisaoCore:
             km_ult = r.get("km_ultimo")
             km_base = r.get("km_base")
             if pd.notna(d_ult) and pd.notna(d_base) and d_ult < d_base:
-                rows.append({
-                    "placa": placa, "problema": "Ordem incoerente",
-                    "obs": f"Último abastecimento ({d_ult}) é anterior ao km_base ({d_base})"
-                })
+                rows.append({"placa": placa, "problema": "Ordem incoerente",
+                             "obs": f"Último abastecimento ({d_ult}) < data base ({d_base})"})
             if (km_ult is not None) and (km_base is not None) and not pd.isna(km_ult) and not pd.isna(km_base):
                 if km_ult < km_base:
-                    rows.append({
-                        "placa": placa, "problema": "KM regrediu",
-                        "obs": f"km_ultimo ({km_ult}) < km_base ({km_base})"
-                    })
+                    rows.append({"placa": placa, "problema": "KM regrediu",
+                                 "obs": f"km_ultimo ({km_ult}) < km_base ({km_base})"})
         return pd.DataFrame(rows)
 
 # ============================== UI – Janela e Abas ==============================
@@ -641,16 +596,71 @@ class RevisaoWindow(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Revisão – Previsão & Controle")
-        self.core = RevisaoCore()
+        self.resize(1280, 720)
+
+        # caminhos atuais (carrega cfg ou vazio)
+        self.paths = self._load_paths()
+        self.core = RevisaoCore(
+            self.paths.get("arq_resp"),
+            self.paths.get("arq_rev"),
+            self.paths.get("arq_cad"),
+            self.paths.get("arq_ext"),
+        )
 
         self._build_ui()
+        self._popular_filtros()
         self._refresh_all_tables()
+
+    # ----- paths cfg -----
+    def _load_paths(self) -> dict:
+        if CFG_PATH.exists():
+            try:
+                return json.loads(CFG_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        return {"arq_resp": "", "arq_rev": "", "arq_cad": "", "arq_ext": ""}
+
+    def _save_paths(self):
+        CFG_PATH.write_text(json.dumps(self.paths, ensure_ascii=False, indent=2), encoding="utf-8")
 
     # ----- UI helpers -----
     def _build_ui(self):
         root = QVBoxLayout(self)
 
-        # Filtros topo
+        # ========== faixa de seleção dos arquivos ==========
+        files_box = QHBoxLayout()
+        def add_picker(label: str, key: str):
+            nonlocal files_box
+            box = QHBoxLayout()
+            lab = QLabel(label); lab.setMinimumWidth(110)
+            ed  = QLineEdit(self.paths.get(key, "")); ed.setPlaceholderText("Escolha o arquivo…"); ed.setMinimumWidth(280)
+            btn = QPushButton("…")
+            def pick():
+                path, _ = QFileDialog.getOpenFileName(self, f"Selecionar {label}", str(APP_DIR), "Planilhas (*.xlsx)")
+                if path:
+                    ed.setText(path)
+                    self.paths[key] = path
+                    self._save_paths()
+            btn.clicked.connect(pick)
+            setattr(self, f"ed_{key}", ed)
+            box.addWidget(lab); box.addWidget(ed); box.addWidget(btn)
+            files_box.addLayout(box)
+
+        add_picker("Responsável:", "arq_resp")
+        add_picker("Revisão:",     "arq_rev")
+        add_picker("Chassi/Ren:",  "arq_cad")
+        add_picker("Extrato:",     "arq_ext")
+
+        btn_reload = QPushButton("Recarregar dados")
+        btn_reload.clicked.connect(self._reload_core)
+        files_box.addWidget(btn_reload)
+
+        root.addLayout(files_box)
+
+        # separador
+        line = QFrame(); line.setFrameShape(QFrame.Shape.HLine); root.addWidget(line)
+
+        # ====== Filtros topo ======
         top = QHBoxLayout()
         self.cb_unidade = QComboBox(); self.cb_unidade.setEditable(False); self.cb_unidade.addItem("Todas as unidades")
         self.cb_responsavel = QComboBox(); self.cb_responsavel.addItem("Todos os responsáveis")
@@ -667,52 +677,55 @@ class RevisaoWindow(QWidget):
         self.btn_aplicar.clicked.connect(self._refresh_all_tables)
         self.btn_limpar.clicked.connect(self._limpar_filtros)
 
-        # Tabs
+        # ====== Tabs ======
         self.tabs = QTabWidget(); root.addWidget(self.tabs)
 
-        # Tab: Geral
         self.tab_geral = QWidget(); self.tabs.addTab(self.tab_geral, "Geral"); self._build_tab_geral()
-
-        # Tab: Calendário
         self.tab_cal = QWidget(); self.tabs.addTab(self.tab_cal, "Calendário"); self._build_tab_calendario()
-
-        # Tab: Por Responsável
         self.tab_resp = QWidget(); self.tabs.addTab(self.tab_resp, "Por Responsável"); self._build_tab_por_responsavel()
-
-        # Tab: Por Oficina
         self.tab_of = QWidget(); self.tabs.addTab(self.tab_of, "Por Oficina"); self._build_tab_por_oficina()
-
-        # Tab: Por Região
         self.tab_reg = QWidget(); self.tabs.addTab(self.tab_reg, "Por Região"); self._build_tab_por_regiao()
-
-        # Tab: Ano Modelo / Renovação
         self.tab_ano = QWidget(); self.tabs.addTab(self.tab_ano, "Ano Modelo / Renovação"); self._build_tab_ano_modelo()
-
-        # Tab: Alertas
         self.tab_alerta = QWidget(); self.tabs.addTab(self.tab_alerta, "Alertas"); self._build_tab_alertas()
-
-        # Tab: Sem Histórico
         self.tab_sem = QWidget(); self.tabs.addTab(self.tab_sem, "Sem histórico"); self._build_tab_sem_historico()
-
-        # Tab: Projeção & Orçamento
         self.tab_proj = QWidget(); self.tabs.addTab(self.tab_proj, "Projeção & Orçamento"); self._build_tab_projecao()
-
-        # Tab: Anomalias
         self.tab_anom = QWidget(); self.tabs.addTab(self.tab_anom, "Anomalias"); self._build_tab_anomalias()
 
-        # Combos de filtro
-        self._popular_filtros()
+    def _reload_core(self):
+        # pega textos dos edits, salva cfg e recarrega core
+        self.paths["arq_resp"] = self.ed_arq_resp.text().strip()
+        self.paths["arq_rev"]  = self.ed_arq_rev.text().strip()
+        self.paths["arq_cad"]  = self.ed_arq_cad.text().strip()
+        self.paths["arq_ext"]  = self.ed_arq_ext.text().strip()
+        self._save_paths()
+        try:
+            self.core = RevisaoCore(
+                self.paths.get("arq_resp") or None,
+                self.paths.get("arq_rev")  or None,
+                self.paths.get("arq_cad")  or None,
+                self.paths.get("arq_ext")  or None,
+            )
+            self._popular_filtros()
+            self._refresh_all_tables()
+            QMessageBox.information(self, "Recarregar", "Dados recarregados com sucesso.")
+        except Exception as e:
+            QMessageBox.critical(self, "Recarregar", f"Falha ao recarregar:\n{e}")
 
     def _popular_filtros(self):
-        df = self.core.previsao
-        if df.empty:
-            return
-        unidades = sorted(set([u for u in df["unidade"].dropna().astype(str).tolist() if u.strip()]))
-        self.cb_unidade.addItems(unidades)
-        resps = sorted(set([r for r in df["responsavel"].dropna().astype(str).tolist() if r.strip()]))
-        self.cb_responsavel.addItems(resps)
-        regs = sorted(set([r for r in df["regiao"].dropna().astype(str).tolist() if r.strip()]))
-        self.cb_regiao.addItems(regs)
+        # limpa e repopula combos
+        for cb, first in [(self.cb_unidade, "Todas as unidades"),
+                          (self.cb_responsavel, "Todos os responsáveis"),
+                          (self.cb_regiao, "Todas as regiões")]:
+            current = cb.currentText() if cb.count() else first
+            cb.clear(); cb.addItem(first)
+            if self.core.previsao.empty: 
+                continue
+            col = {"Todas as unidades":"unidade","Todos os responsáveis":"responsavel","Todas as regiões":"regiao"}[first]
+            vals = sorted(set([v for v in self.core.previsao[col].dropna().astype(str).tolist() if v.strip()])) if col in self.core.previsao.columns else []
+            cb.addItems(vals)
+            # tenta restaurar seleção anterior
+            if current in vals:
+                cb.setCurrentText(current)
 
     def _aplicar_filtros_df(self, df: pd.DataFrame) -> pd.DataFrame:
         if df is None or df.empty:
@@ -721,7 +734,6 @@ class RevisaoWindow(QWidget):
         u_sel = self.cb_unidade.currentText()
         r_sel = self.cb_responsavel.currentText()
         g_sel = self.cb_regiao.currentText()
-
         out = df.copy()
         if u_sel and u_sel != "Todas as unidades" and "unidade" in out.columns:
             out = out[out["unidade"].astype(str) == u_sel]
@@ -736,13 +748,6 @@ class RevisaoWindow(QWidget):
                 out = out[out["placa_norm"].astype(str).str.contains(placa_q)]
         return out
 
-    def _limpar_filtros(self):
-        self.cb_unidade.setCurrentIndex(0)
-        self.cb_responsavel.setCurrentIndex(0)
-        self.cb_regiao.setCurrentIndex(0)
-        self.ed_busca_placa.clear()
-        self._refresh_all_tables()
-
     def _create_table(self, parent: QWidget, cols: List[str]) -> QTableWidget:
         tbl = QTableWidget(parent)
         tbl.setColumnCount(len(cols))
@@ -751,26 +756,60 @@ class RevisaoWindow(QWidget):
         tbl.setSortingEnabled(True)
         return tbl
 
-    def _fill_table(self, tbl: QTableWidget, df: pd.DataFrame, cols: List[str]):
+    def _fill_table(self, tbl: QTableWidget, df: pd.DataFrame, cols: List[str], colorize_status: bool = False):
         df = df.copy() if df is not None else pd.DataFrame(columns=cols)
         df = df[cols] if (not df.empty and all(c in df.columns for c in cols)) else df
         tbl.setRowCount(len(df))
         for i, row in df.iterrows():
             for j, c in enumerate(cols):
                 val = row.get(c)
-                s = "" if pd.isna(val) or val is None else str(val)
-                tbl.setItem(i, j, QTableWidgetItem(s))
+
+                # formatação simpática
+                if isinstance(val, (datetime, date)):
+                    s = _fmt_date(val if isinstance(val, date) else val.date())
+                elif c in {"data_base","prox_data_por_tempo","data_km_base","data_km_ultimo"}:
+                    s = _fmt_date(val)
+                elif c.lower().startswith(("km", "dias")) or c in {"prox_real_em_dias"}:
+                    s = _fmt_num(val)
+                elif c in {"renovacao_agora","renovacao_na_proxima"}:
+                    s = _bool_tag(val)
+                else:
+                    s = "" if pd.isna(val) or val is None else str(val)
+
+                it = QTableWidgetItem(s)
+                # alinhamento numérico
+                if c.lower().startswith(("km", "dias")) or c in {"prox_real_em_dias"}:
+                    it.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                tbl.setItem(i, j, it)
+
+        # coloração por status
+        if colorize_status and df is not None and len(df):
+            if "status" in df.columns and "status" in cols:
+                st_idx = cols.index("status")
+                for i in range(tbl.rowCount()):
+                    st_item = tbl.item(i, st_idx)
+                    st = st_item.text() if st_item else ""
+                    for j in range(tbl.columnCount()):
+                        it = tbl.item(i, j)
+                        if not it:
+                            continue
+                        if st == "Vencido":
+                            it.setBackground(Qt.GlobalColor.red)
+                            it.setForeground(Qt.GlobalColor.white)
+                        elif st == "Atenção":
+                            it.setBackground(Qt.GlobalColor.yellow)
+                        # Em dia fica normal
         tbl.resizeColumnsToContents()
 
     # ---- Tabs ----
     def _build_tab_geral(self):
         lay = QVBoxLayout(self.tab_geral)
         self.lbl_kpis = QLabel(); lay.addWidget(self.lbl_kpis)
-        cols = [
+        self.cols_geral = [
             "placa","responsavel","unidade","regiao","dias_faltando","km_faltando",
-            "prox_data_por_tempo","km_meta","km_ultimo","status","renovacao_agora","renovacao_na_proxima"
+            "prox_data_por_tempo","km_meta","km_ultimo","status","renovacao_agora","renovacao_na_proxima","prox_real_em_dias"
         ]
-        self.tbl_geral = self._create_table(self.tab_geral, cols)
+        self.tbl_geral = self._create_table(self.tab_geral, self.cols_geral)
         lay.addWidget(self.tbl_geral)
 
         btns = QHBoxLayout()
@@ -780,9 +819,10 @@ class RevisaoWindow(QWidget):
         btns.addWidget(self.btn_export_xlsx); btns.addWidget(self.btn_export_csv); btns.addWidget(self.btn_copiar); btns.addStretch(1)
         lay.addLayout(btns)
 
-        self.btn_export_xlsx.clicked.connect(lambda: self._exportar(self.core.previsao, "PrevisaoRevisao.xlsx"))
-        self.btn_export_csv.clicked.connect(lambda: self._exportar(self.core.previsao, "PrevisaoRevisao.csv"))
-        self.btn_copiar.clicked.connect(lambda: self._copiar_para_clipboard(self.core.previsao))
+        # exportam o QUE ESTÁ FILTRADO
+        self.btn_export_xlsx.clicked.connect(lambda: self._exportar(self._aplicar_filtros_df(self.core.previsao), "PrevisaoRevisao.xlsx"))
+        self.btn_export_csv.clicked.connect(lambda: self._exportar(self._aplicar_filtros_df(self.core.previsao), "PrevisaoRevisao.csv"))
+        self.btn_copiar.clicked.connect(lambda: self._copiar_para_clipboard(self._aplicar_filtros_df(self.core.previsao)))
 
     def _build_tab_calendario(self):
         lay = QVBoxLayout(self.tab_cal)
@@ -813,7 +853,7 @@ class RevisaoWindow(QWidget):
 
     def _build_tab_alertas(self):
         lay = QVBoxLayout(self.tab_alerta)
-        cols = ["placa","responsavel","unidade","regiao","dias_faltando","km_faltando","prox_data_por_tempo","status","renovacao_agora","renovacao_na_proxima"]
+        cols = ["placa","responsavel","unidade","regiao","dias_faltando","km_faltando","prox_data_por_tempo","status","renovacao_agora","renovacao_na_proxima","prox_real_em_dias"]
         self.tbl_alerta = self._create_table(self.tab_alerta, cols)
         lay.addWidget(self.tbl_alerta)
 
@@ -827,7 +867,7 @@ class RevisaoWindow(QWidget):
         lay = QVBoxLayout(self.tab_proj)
         self.tbl_proj = self._create_table(self.tab_proj, ["ano_mes","custo_previsto"])
         lay.addWidget(self.tbl_proj)
-        hint = QLabel("<i>Observação: custo médio estimado usa histórico (custo_rev) se existir; caso contrário, R$ 500 como referência.</i>")
+        hint = QLabel("<i>Obs.: custo médio usa histórico (custo_rev) se existir; senão, R$ 500 como referência.</i>")
         lay.addWidget(hint)
 
     def _build_tab_anomalias(self):
@@ -840,50 +880,25 @@ class RevisaoWindow(QWidget):
     def _refresh_all_tables(self):
         df_main = self._aplicar_filtros_df(self.core.previsao)
 
-        # KPIs
         total = len(df_main)
         venc  = (df_main["status"] == "Vencido").sum() if total else 0
         atn   = (df_main["status"] == "Atenção").sum() if total else 0
         emdia = (df_main["status"] == "Em dia").sum() if total else 0
         self.lbl_kpis.setText(f"<b>Total:</b> {total} | <b>Vencidos:</b> {venc} | <b>Atenção:</b> {atn} | <b>Em dia:</b> {emdia}")
 
-        cols_geral = [
-            "placa","responsavel","unidade","regiao","dias_faltando","km_faltando",
-            "prox_data_por_tempo","km_meta","km_ultimo","status","renovacao_agora","renovacao_na_proxima"
-        ]
-        self._fill_table(self.tbl_geral, df_main, cols_geral)
+        self._fill_table(self.tbl_geral, df_main, self.cols_geral, colorize_status=True)
 
-        # Calendário
-        df_cal = self.core.agg_calendario()
-        self._fill_table(self.tbl_cal, df_cal, ["ano_mes","qtd"])
-
-        # Por Responsável e Unidade
-        df_resp = self.core.agg_por_responsavel()
-        df_unid = self.core.agg_por_unidade()
-        self._fill_table(self.tbl_resp, df_resp, ["responsavel","total","vencido","atencao","em_dia"])
-        self._fill_table(self.tbl_unid, df_unid, ["unidade","total","vencido","atencao","em_dia"])
-
-        # Por Oficina
+        df_cal = self.core.agg_calendario(); self._fill_table(self.tbl_cal, df_cal, ["ano_mes","qtd"])
+        df_resp = self.core.agg_por_responsavel(); self._fill_table(self.tbl_resp, df_resp, ["responsavel","total","vencido","atencao","em_dia"])
+        df_unid = self.core.agg_por_unidade(); self._fill_table(self.tbl_unid, df_unid, ["unidade","total","vencido","atencao","em_dia"])
         df_of = self.core.agg_por_oficina(); self._fill_table(self.tbl_of, df_of, ["oficina","qtd"])
-
-        # Por Região
         df_reg = self.core.agg_por_regiao(); self._fill_table(self.tbl_reg, df_reg, ["regiao","total","vencido","atencao","em_dia"])
-
-        # Ano Modelo / Renovação
         df_ano = self.core.agg_por_ano_modelo(); self._fill_table(self.tbl_ano, df_ano, ["ano_modelo","qtd","renovacao_agora","renovacao_na_proxima"])
-
-        # Alertas
         df_al = self.core.view_alertas(); df_al = self._aplicar_filtros_df(df_al)
-        self._fill_table(self.tbl_alerta, df_al, ["placa","responsavel","unidade","regiao","dias_faltando","km_faltando","prox_data_por_tempo","status","renovacao_agora","renovacao_na_proxima"])
-
-        # Sem histórico
+        self._fill_table(self.tbl_alerta, df_al, ["placa","responsavel","unidade","regiao","dias_faltando","km_faltando","prox_data_por_tempo","status","renovacao_agora","renovacao_na_proxima","prox_real_em_dias"])
         df_sh = self.core.view_sem_historico(); df_sh = self._aplicar_filtros_df(df_sh)
         self._fill_table(self.tbl_sem, df_sh, ["placa","responsavel","unidade","data_base","km_ultimo","status"])
-
-        # Projeção
         df_pj = self.core.projecao_orcamento(); self._fill_table(self.tbl_proj, df_pj, ["ano_mes","custo_previsto"])
-
-        # Anomalias
         df_an = self.core.view_anomalias(); self._fill_table(self.tbl_anom, df_an, ["placa","problema","obs"])
 
     # ----- Export / Clipboard -----
@@ -891,7 +906,7 @@ class RevisaoWindow(QWidget):
         if df is None or df.empty:
             QMessageBox.warning(self, "Exportar", "Não há dados para exportar.")
             return
-        dlg = QFileDialog(self, "Salvar arquivo", str(BASE / suggested_name))
+        dlg = QFileDialog(self, "Salvar arquivo", str(APP_DIR / suggested_name))
         if suggested_name.lower().endswith(".xlsx"):
             dlg.setDefaultSuffix("xlsx"); dlg.setNameFilters(["Planilha Excel (*.xlsx)", "CSV (*.csv)"])
         else:
@@ -912,10 +927,27 @@ class RevisaoWindow(QWidget):
             return
         cols = [
             "placa","responsavel","unidade","dias_faltando","km_faltando",
-            "prox_data_por_tempo","km_meta","km_ultimo","status","renovacao_agora","renovacao_na_proxima"
+            "prox_data_por_tempo","km_meta","km_ultimo","status","renovacao_agora","renovacao_na_proxima","prox_real_em_dias"
         ]
         sub = df[cols] if all(c in df.columns for c in cols) else df.copy()
         txt = sub.to_csv(index=False, sep="\t")
-        from PyQt6.QtWidgets import QApplication
         QApplication.clipboard().setText(txt)
         QMessageBox.information(self, "Copiado", "Linhas copiadas para a área de transferência.")
+
+    def _limpar_filtros(self):
+        """Reseta os filtros do topo e recarrega as tabelas."""
+        try:
+            self.cb_unidade.setCurrentIndex(0)
+        except Exception:
+            pass
+        try:
+            self.cb_responsavel.setCurrentIndex(0)
+        except Exception:
+            pass
+        try:
+            self.cb_regiao.setCurrentIndex(0)
+        except Exception:
+            pass
+        if hasattr(self, "ed_busca_placa"):
+            self.ed_busca_placa.clear()
+        self._refresh_all_tables()
