@@ -72,7 +72,6 @@ MULTAS_ROOT      = os.path.join(APP_DIR, "Multas")
 GERAL_MULTAS_CSV = os.path.join(MULTAS_ROOT, "geral_multas.csv")
 PASTORES_DIR     = os.path.join(APP_DIR, "Pastores")
 
-# >>> RESTAURADO: usado por multas.py <<<
 DATE_FORMAT = "dd/MM/yyyy"
 
 STYLE = """
